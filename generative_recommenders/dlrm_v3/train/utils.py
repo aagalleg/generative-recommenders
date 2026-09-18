@@ -32,7 +32,18 @@ from typing import (
 
 import gin
 import torch
+
 import torchrec
+
+# XPU: import fbgemm_xpu after torchrec/fbgemm_gpu, never before -- fbgemm_gpu's
+# op registration isn't guarded against duplicates, so an earlier import aborts
+# the process with a c10::Error. fbgemm_xpu's own schemaExists() guard makes it
+# safe to import here, attaching XPU kernels to ops fbgemm_gpu already owns.
+try:
+    import fbgemm_xpu  # noqa: F401
+except ImportError:
+    pass
+
 from generative_recommenders.dlrm_v3.checkpoint import save_dmp_checkpoint
 from generative_recommenders.dlrm_v3.configs import (
     get_embedding_table_config,
@@ -40,6 +51,7 @@ from generative_recommenders.dlrm_v3.configs import (
 )
 from generative_recommenders.dlrm_v3.datasets.dataset import collate_fn, Dataset
 from generative_recommenders.dlrm_v3.utils import get_dataset, MetricsLogger, Profiler
+from generative_recommenders.common import HammerKernel
 from generative_recommenders.modules.dlrm_hstu import DlrmHSTU, DlrmHSTUConfig
 from torch import distributed as dist
 from torch.distributed.optim import (
@@ -69,18 +81,56 @@ TORCHREC_TYPES: Set[Type[Union[EmbeddingBagCollection, EmbeddingCollection]]] = 
 }
 
 
+def _is_xccl_available() -> bool:
+    try:
+        return dist.is_xccl_available()
+    except (AttributeError, RuntimeError):
+        return False
+
+
+def get_dist_backend(device: torch.device) -> str:
+    """Return the best distributed backend for the given device."""
+    if device.type == "xpu":
+        if _is_xccl_available():
+            return "xccl"
+        logger.warning("XCCL not available, falling back to gloo for XPU")
+        return "gloo"
+    elif device.type == "cuda":
+        return "nccl"
+    return "gloo"
+
+
 def setup(
     rank: int, world_size: int, master_port: int, device: torch.device
 ) -> dist.ProcessGroup:
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = str(master_port)
 
-    BACKEND = dist.Backend.NCCL
+    BACKEND = get_dist_backend(device)
     TIMEOUT = 1800
 
     # initialize the process group
     if not dist.is_initialized():
-        dist.init_process_group("nccl", rank=rank, world_size=world_size)
+        # For XPU+XCCL we need a multi-backend PG: gloo for CPU tensor
+        # collectives (used by torchmetrics) and xccl for XPU tensors.
+        if BACKEND == "xccl":
+            # CCL/oneCCL uses its own rank-discovery path (via MPI or ATL/OFI).
+            # torchrun sets RANK/WORLD_SIZE/LOCAL_RANK/LOCAL_WORLD_SIZE, but CCL
+            # looks for MPI_LOCALRANKID / MPI_LOCALNRANKS to identify the per-node
+            # rank. Without these it falls back to ATL/OFI fabric discovery, which
+            # hangs indefinitely in containers without InfiniBand/PSM2.
+            # Map torchrun vars to CCL-understood vars so CCL skips OFI discovery.
+            _local_rank = os.environ.get("LOCAL_RANK", str(rank))
+            _local_size = os.environ.get("LOCAL_WORLD_SIZE", str(world_size))
+            os.environ.setdefault("MPI_LOCALRANKID", _local_rank)
+            os.environ.setdefault("MPI_LOCALNRANKS", _local_size)
+            os.environ.setdefault("PMI_RANK", str(rank))
+            os.environ.setdefault("PMI_SIZE", str(world_size))
+            dist.init_process_group(
+                "cpu:gloo,xpu:xccl", rank=rank, world_size=world_size
+            )
+        else:
+            dist.init_process_group(BACKEND, rank=rank, world_size=world_size)
 
     pg = dist.new_group(
         backend=BACKEND,
@@ -88,7 +138,10 @@ def setup(
     )
 
     # set device
-    torch.cuda.set_device(device)
+    if device.type == "xpu":
+        torch.xpu.set_device(device)
+    elif device.type == "cuda":
+        torch.cuda.set_device(device)
 
     return pg
 
@@ -177,6 +230,9 @@ def make_model(
         embedding_tables=table_config,
         is_inference=False,
     )
+    # Force PYTORCH kernel on XPU — Triton HSTU attention backward crashes on XPU
+    if torch.xpu.is_available():
+        model.set_hammer_kernel(HammerKernel.PYTORCH)
 
     return (
         model,
@@ -266,23 +322,39 @@ def make_optimizer_and_shard(
     sparse_opt_cls, sparse_opt_args, sparse_opt_factory = (
         sparse_optimizer_factory_and_class()
     )
-    # Fuse sparse optimizer to backward step
-    for k, module in model.named_modules():
-        if type(module) in TORCHREC_TYPES:
-            for _, param in module.named_parameters(prefix=k):
-                if param.requires_grad:
-                    apply_optimizer_in_backward(
-                        sparse_opt_cls, [param], sparse_opt_args
-                    )
+    # Fuse sparse optimizer to backward step.
+    # Skipped on XPU only: fusing the sparse optimizer into the backward pass
+    # triggers a SIGSEGV during DDP/XCCL process-group init on XPU (use-after-free
+    # in the XPU caching allocator interacting with in-flight SYCL kernels).
+    # CUDA/CPU keep the fused optimizer-in-backward optimization.
+    if device.type != "xpu":
+        for k, module in model.named_modules():
+            if type(module) in TORCHREC_TYPES:
+                for _, param in module.named_parameters(prefix=k):
+                    if param.requires_grad:
+                        apply_optimizer_in_backward(
+                            sparse_opt_cls, [param], sparse_opt_args
+                        )
     sharders = get_default_sharders()
+    compute_device = device.type if device.type in ("cuda", "xpu") else "cpu"
+
+    from torchrec.distributed.planner.constants import (
+        detect_hbm_cap,
+        detect_hbm_mem_bw,
+    )
+
+    hbm_cap = detect_hbm_cap(compute_device, device.index or 0) if device.type in ("cuda", "xpu") else 0
+    hbm_mem_bw = detect_hbm_mem_bw(compute_device, device.index or 0)
+
     planner = EmbeddingShardingPlanner(
         topology=Topology(
             local_world_size=world_size,
             world_size=world_size,
-            compute_device="cuda",
-            hbm_cap=160 * 1024 * 1024 * 1024,
+            compute_device=compute_device,
+            hbm_cap=hbm_cap,
             ddr_cap=32 * 1024 * 1024 * 1024,
-        )
+            hbm_mem_bw=hbm_mem_bw,
+        ),
     )
     pg = dist.GroupMember.WORLD
     env = ShardingEnv.from_process_group(pg)  # pyre-ignore [6]
@@ -330,7 +402,13 @@ def make_optimizer_and_shard(
         )
     # pyrefly: ignore [bad-argument-type]
     output_optimizer = CombinedOptimizer(all_optimizers)
-    output_optimizer.init_state(set(model.sparse_grad_parameter_names()))
+    # init_state is skipped on XPU only: calling it corrupts FP16 embedding
+    # weights on XPU (observed as NaN/garbage weights after init, root-caused to
+    # the same XPU caching-allocator/stream-ordering issue as the
+    # apply_optimizer_in_backward skip above). CUDA/CPU keep the normal
+    # optimizer-state initialization.
+    if device.type != "xpu":
+        output_optimizer.init_state(set(model.sparse_grad_parameter_names()))
     return model, output_optimizer
 
 
@@ -594,7 +672,8 @@ def train_eval_loop(
                 sample.candidates_features_kjt,
             )
             # pyre-ignore
-            sum(aux_losses.values()).backward()
+            _loss = sum(aux_losses.values())
+            _loss.backward()
             optimizer.step()
             metric_logger.update(
                 mode="train",

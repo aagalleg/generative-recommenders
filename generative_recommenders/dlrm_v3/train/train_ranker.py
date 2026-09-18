@@ -23,6 +23,7 @@ import traceback
 
 import gin
 import torch
+
 from generative_recommenders.dlrm_v3.checkpoint import load_dmp_checkpoint
 from generative_recommenders.dlrm_v3.train.utils import (
     cleanup,
@@ -61,8 +62,15 @@ def _main_func(
     master_port: int,
     gin_file: str,
     mode: str,
+    device_type: str = "cuda",
 ) -> None:
-    device = torch.device(f"cuda:{rank}")
+    if device_type == "xpu":
+        assert torch.xpu.is_available(), "XPU requested but torch.xpu is not available"
+        device = torch.device(f"xpu:{rank}")
+    elif device_type == "cuda":
+        device = torch.device(f"cuda:{rank}")
+    else:
+        device = torch.device("cpu")
     logger.info(f"rank: {rank}, world_size: {world_size}, device: {device}")
     setup(
         rank=rank,
@@ -73,10 +81,28 @@ def _main_func(
     # parse all arguments
     gin.parse_config_file(gin_file)
 
+    # XPU: HSTU_EMBEDDING_DIM/HASH_SIZE are shared between get_hstu_configs()
+    # and get_embedding_table_config() in configs.py, so they must stay in
+    # sync as module-level globals rather than independent gin bindings. All
+    # other HSTU dims are configurable via gin (get_hstu_configs.* bindings).
+    if device_type == "xpu":
+        import os as _os
+        import generative_recommenders.dlrm_v3.configs as _configs
+        _configs.HSTU_EMBEDDING_DIM = int(_os.environ.get("HSTU_EMBEDDING_DIM", "64"))
+        _configs.HASH_SIZE = int(_os.environ.get("HASH_SIZE", "1000000"))
+
     model, model_configs, embedding_table_configs = make_model()
+
     model, optimizer = make_optimizer_and_shard(
-        model=model, device=device, world_size=world_size
+        model=model, device=device, world_size=world_size,
     )
+
+    # XPU: sync before training starts. record_stream() is a no-op on XPU, so
+    # without this the allocator can reclaim sharding-kernel buffers while
+    # they're still in flight, causing a GPU page fault on the first step.
+    if device_type == "xpu":
+        torch.xpu.synchronize()
+
     train_dataloader, test_dataloader = make_train_test_dataloaders(
         hstu_config=model_configs,
         embedding_table_configs=embedding_table_configs,
@@ -157,6 +183,23 @@ def get_args():  # pyre-ignore [3]
         choices=["train", "eval", "train-eval", "streaming-train-eval"],
         help="mode",
     )
+    parser.add_argument(
+        "--device_type",
+        default="cuda",
+        choices=["cuda", "xpu", "cpu"],
+        help="device type",
+    )
+    parser.add_argument(
+        "--world_size",
+        type=int,
+        default=0,
+        help="override world size (0 = auto-detect for the device type)",
+    )
+    parser.add_argument(
+        "--gin_config_file",
+        default=None,
+        help="path to custom gin config file (overrides --dataset gin)",
+    )
     args, unknown_args = parser.parse_known_args()
     logger.warning(f"unknown_args: {unknown_args}")
     return args
@@ -172,17 +215,54 @@ def main() -> None:
         "train-eval",
         "streaming-train-eval",
     ], f"Unsupported mode: {args.mode}"
-    WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
-    MASTER_PORT = str(get_free_port())
-    gin_path = f"{os.path.dirname(__file__)}/gin/{SUPPORTED_CONFIGS[args.dataset]}"
 
-    mp.start_processes(
-        _main_func,
-        args=(WORLD_SIZE, MASTER_PORT, gin_path, args.mode),
-        nprocs=WORLD_SIZE,
-        join=True,
-        start_method="spawn",
-    )
+    device_type = args.device_type
+
+    # XPU-specific validation
+    if device_type == "xpu":
+        assert torch.xpu.is_available(), "XPU requested but not available"
+
+    # Determine world size
+    if args.world_size > 0:
+        WORLD_SIZE = args.world_size
+    elif "WORLD_SIZE" in os.environ:
+        WORLD_SIZE = int(os.environ["WORLD_SIZE"])
+    else:
+        if device_type == "xpu":
+            WORLD_SIZE = torch.xpu.device_count()
+        elif device_type == "cuda":
+            WORLD_SIZE = torch.cuda.device_count()
+        else:
+            WORLD_SIZE = 1
+
+    MASTER_PORT = os.environ.get("MASTER_PORT", str(get_free_port()))
+
+    # Resolve gin config
+    if args.gin_config_file:
+        gin_path = args.gin_config_file
+    else:
+        gin_path = f"{os.path.dirname(__file__)}/gin/{SUPPORTED_CONFIGS[args.dataset]}"
+
+    # Check if launched via torchrun (LOCAL_RANK env var present)
+    local_rank = os.environ.get("LOCAL_RANK", None)
+    if local_rank is not None:
+        # torchrun already spawned processes; run _main_func directly
+        _main_func(
+            rank=int(local_rank),
+            world_size=WORLD_SIZE,
+            master_port=int(MASTER_PORT),
+            gin_file=gin_path,
+            mode=args.mode,
+            device_type=device_type,
+        )
+    else:
+        mp.start_processes(
+            _main_func,
+            args=(WORLD_SIZE, int(MASTER_PORT), gin_path, args.mode, device_type),
+            nprocs=WORLD_SIZE,
+            join=True,
+            start_method="spawn",
+        )
 
 
 if __name__ == "__main__":

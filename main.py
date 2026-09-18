@@ -26,6 +26,15 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "1"  # Hide excessive tensorflow debug mess
 import sys
 
 import fbgemm_gpu  # noqa: F401, E402
+# XPU: import fbgemm_xpu after fbgemm_gpu, never before -- fbgemm_gpu's op
+# registration isn't guarded against duplicates, so an earlier import aborts
+# the process with a c10::Error. fbgemm_xpu's own schemaExists() guard makes
+# it safe to import here, attaching XPU kernels to ops fbgemm_gpu already owns.
+try:
+    import fbgemm_xpu  # noqa: F401
+except ImportError:
+    pass
+
 import gin
 import torch
 import torch.multiprocessing as mp
@@ -63,7 +72,10 @@ def mp_train_fn(
 
 
 def _main(argv) -> None:  # pyre-ignore [2]
-    world_size = torch.cuda.device_count()
+    if torch.xpu.is_available():
+        world_size = torch.xpu.device_count()
+    else:
+        world_size = torch.cuda.device_count()
 
     mp.set_start_method("forkserver")
     mp.spawn(

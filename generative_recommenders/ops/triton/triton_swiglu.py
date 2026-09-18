@@ -26,7 +26,7 @@ import triton
 # @manual=//triton:triton
 import triton.language as tl
 from generative_recommenders.common import triton_autotune
-from generative_recommenders.ops.utils import is_sm100_plus
+from generative_recommenders.ops.utils import get_sm_count, is_sm100_plus
 
 TMA_AVAILABLE = False
 try:
@@ -457,7 +457,7 @@ def triton_swiglu_fwd_tma_ws_persistent_tlx(
 
     M_BLOCK = triton.next_power_of_2(M)
 
-    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
+    NUM_SMS = get_sm_count(x.device)
 
     # A dummy block value that will be overwritten by the hook
     dummy_block = [1, 1]

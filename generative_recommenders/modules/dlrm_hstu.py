@@ -371,7 +371,7 @@ class DlrmHSTU(HammerModule):
             )
         else:
             with torch.autocast(
-                "cuda",
+                embedding.device.type if embedding.device.type in ("cuda", "xpu") else "cpu",
                 dtype=torch.bfloat16,
                 enabled=(not self.is_inference) and self._bf16_training,
             ):

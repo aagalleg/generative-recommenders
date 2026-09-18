@@ -241,9 +241,13 @@ amd_gpu_unavailable: Tuple[bool, str] = (
 )
 amd_gpu_available: bool = not amd_gpu_unavailable[0]
 
+intel_xpu_available: bool = (
+    torch.xpu.is_available() and torch.xpu.device_count() > 0
+)
+
 gpu_unavailable: Tuple[bool, str] = (
-    not nv_gpu_available and not amd_gpu_available,
-    "CUDA/HIP is not available or no GPUs detected",
+    not nv_gpu_available and not amd_gpu_available and not intel_xpu_available,
+    "CUDA/HIP/XPU is not available or no GPUs detected",
 )
 
 gpu_available: bool = not gpu_unavailable[0]

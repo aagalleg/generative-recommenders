@@ -2765,9 +2765,11 @@ def triton_hstu_attention_fwd(
             block_shape=dummy_block,
         )
 
+    _alloc_device = q.device
+
     def alloc_fn(size: int, align: int, stream: Optional[int]):
         assert align == TMA_DESC_SIZE
-        return torch.empty(size, dtype=torch.int8, device="cuda")
+        return torch.empty(size, dtype=torch.int8, device=_alloc_device)
 
     # pyre-ignore [6]
     triton.set_allocator(alloc_fn)
@@ -2869,9 +2871,11 @@ def triton_hstu_attention_bwd(
     TMA_DESC_SIZE = 128
     tma_workspace = None
 
+    _alloc_device = q.device
+
     def alloc_fn(size: int, align: int, stream: Optional[int]):
         assert align == TMA_DESC_SIZE
-        return torch.empty(size, dtype=torch.int8, device="cuda")
+        return torch.empty(size, dtype=torch.int8, device=_alloc_device)
 
     # pyre-ignore [6]
     triton.set_allocator(alloc_fn)
@@ -3169,9 +3173,11 @@ def triton_cached_hstu_mha(
             block_shape=dummy_block,
         )
 
+    _alloc_device = delta_q.device
+
     def alloc_fn(size: int, align: int, stream: Optional[int]):
         assert align == TMA_DESC_SIZE
-        return torch.empty(size, dtype=torch.int8, device="cuda")
+        return torch.empty(size, dtype=torch.int8, device=_alloc_device)
 
     # pyre-ignore [6]
     triton.set_allocator(alloc_fn)

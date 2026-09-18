@@ -45,6 +45,7 @@ except ImportError:
     HAS_TLX = False
 
 from generative_recommenders.common import triton_autotune
+from generative_recommenders.ops.utils import get_sm_count, is_sm100_plus
 
 try:
     # @manual=//triton:triton
@@ -1588,7 +1589,7 @@ def triton_addmm_fwd_tma_persistent(
     # pyre-ignore[6]: In call `TensorDescriptor.__init__`, for 2nd positional
     # argument, expected `List[int]` but got `Size`
     z_desc = TensorDescriptor(z, z.shape, z.stride(), dummy_block)
-    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
+    NUM_SMS = get_sm_count(x.device)
 
     def grid(meta):
         BLOCK_M = meta["BLOCK_M"]
@@ -1693,7 +1694,13 @@ def triton_addmm_fwd_tma_ws_persistent_tlx(
     if M == 0 or N == 0:
         return z
 
-    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
+    if is_y_1d:
+        NUM_SMEM_BUFFERS = 5
+        NUM_TMEM_BUFFERS = 2
+    else:
+        NUM_SMEM_BUFFERS = 4
+        NUM_TMEM_BUFFERS = 2
+    NUM_SMS = get_sm_count(x.device)
 
     # A dummy block value that will be overwritten by the hook
     dummy_block = [1, 1]

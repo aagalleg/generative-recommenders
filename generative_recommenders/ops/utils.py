@@ -84,6 +84,13 @@ def is_sm90_plus() -> bool:
     return is_sm100_plus() or is_sm90()
 
 
+def get_sm_count(device: torch.device) -> int:
+    """Return SM/EU count for CUDA or XPU devices without hard-coding 'cuda'."""
+    if device.type == "xpu":
+        return torch.xpu.get_device_properties(device).gpu_eu_count
+    return torch.cuda.get_device_properties(device).multi_processor_count
+
+
 def copy_if_different_ptr(dst: torch.Tensor, src: torch.Tensor) -> None:
     if torch.compiler.is_compiling():
         # .data_ptr() will break PT2

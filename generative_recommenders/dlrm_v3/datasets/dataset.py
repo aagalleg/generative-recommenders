@@ -206,11 +206,11 @@ def kjt_batch_func(
     ).int()
     batched_offset = torch.ops.fbgemm.asynchronous_complete_cumsum(batched_length)
     reorder_length = torch.ops.fbgemm.reorder_batched_ad_lengths(
-        batched_length, bs_offset, bs
+        batched_length, bs_offset, bs, False
     )
     reorder_offsets = torch.ops.fbgemm.asynchronous_complete_cumsum(reorder_length)
     reorder_indices = torch.ops.fbgemm.reorder_batched_ad_indices(
-        batched_offset, batched_indices, reorder_offsets, bs_offset, bs
+        batched_offset, batched_indices, reorder_offsets, bs_offset, bs, False, 0
     )
     out = KeyedJaggedTensor(
         keys=kjt_list[0].keys(),

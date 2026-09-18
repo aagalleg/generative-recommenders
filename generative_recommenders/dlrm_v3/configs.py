@@ -21,6 +21,8 @@ This module provides configuration functions for the HSTU model architecture and
 
 from typing import Dict
 
+import gin
+
 from generative_recommenders.modules.dlrm_hstu import DlrmHSTUConfig
 from generative_recommenders.modules.multitask_module import (
     MultitaskTaskType,
@@ -33,7 +35,16 @@ HASH_SIZE = 10_000_000
 HASH_SIZE_1B = 1_000_000_000
 
 
-def get_hstu_configs(dataset: str = "debug") -> DlrmHSTUConfig:
+@gin.configurable
+def get_hstu_configs(
+    dataset: str = "debug",
+    hstu_num_heads: int = 4,
+    hstu_attn_linear_dim: int = 128,
+    hstu_attn_qk_dim: int = 128,
+    hstu_attn_num_layers: int = 5,
+    hstu_preprocessor_hidden_dim: int = 256,
+    hstu_transducer_embedding_dim: int = 512,
+) -> DlrmHSTUConfig:
     """
     Create and return HSTU model configuration.
 
@@ -43,18 +54,24 @@ def get_hstu_configs(dataset: str = "debug") -> DlrmHSTUConfig:
 
     Args:
         dataset: Dataset identifier (currently unused, reserved for dataset-specific configs).
+        hstu_num_heads: Number of attention heads.
+        hstu_attn_linear_dim: Attention linear layer dimension.
+        hstu_attn_qk_dim: Attention query/key dimension.
+        hstu_attn_num_layers: Number of HSTU attention layers.
+        hstu_preprocessor_hidden_dim: Preprocessor hidden dimension.
+        hstu_transducer_embedding_dim: Transducer embedding dimension.
 
     Returns:
         DlrmHSTUConfig: Complete configuration object for the HSTU model.
     """
     hstu_config = DlrmHSTUConfig(
-        hstu_num_heads=4,
-        hstu_attn_linear_dim=128,
-        hstu_attn_qk_dim=128,
-        hstu_attn_num_layers=5,
+        hstu_num_heads=hstu_num_heads,
+        hstu_attn_linear_dim=hstu_attn_linear_dim,
+        hstu_attn_qk_dim=hstu_attn_qk_dim,
+        hstu_attn_num_layers=hstu_attn_num_layers,
         hstu_embedding_table_dim=HSTU_EMBEDDING_DIM,
-        hstu_preprocessor_hidden_dim=256,
-        hstu_transducer_embedding_dim=512,
+        hstu_preprocessor_hidden_dim=hstu_preprocessor_hidden_dim,
+        hstu_transducer_embedding_dim=hstu_transducer_embedding_dim,
         hstu_group_norm=False,
         hstu_input_dropout_ratio=0.2,
         hstu_linear_dropout_rate=0.1,
