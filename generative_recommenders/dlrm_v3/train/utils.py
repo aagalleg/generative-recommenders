@@ -60,10 +60,13 @@ from torch.distributed.optim import (
 from torch.optim.optimizer import Optimizer
 from torch.utils.data import DataLoader, Dataset as TorchDataset
 from torch.utils.data.distributed import _T_co, DistributedSampler
+from torchrec.distributed.embedding import EmbeddingCollectionSharder
+from torchrec.distributed.embeddingbag import EmbeddingBagCollectionSharder
 from torchrec.distributed.model_parallel import DistributedModelParallel
 from torchrec.distributed.planner import EmbeddingShardingPlanner, Topology
 from torchrec.distributed.sharding_plan import get_default_sharders
 from torchrec.distributed.types import ShardedTensor, ShardingEnv
+from torchrec.distributed.utils import optimizer_type_to_emb_opt_type
 from torchrec.modules.embedding_configs import EmbeddingConfig
 from torchrec.modules.embedding_modules import (
     EmbeddingBagCollection,
@@ -335,25 +338,40 @@ def make_optimizer_and_shard(
                         apply_optimizer_in_backward(
                             sparse_opt_cls, [param], sparse_opt_args
                         )
-    sharders = get_default_sharders()
+        sharders = get_default_sharders()
+    else:
+        # apply_optimizer_in_backward() (skipped above) is what normally tags
+        # each sparse param with `_optimizer_classes`/`_optimizer_kwargs`,
+        # which torchrec's sharding code (torchrec/distributed/embedding.py,
+        # embeddingbag.py) reads to build the fused TBE's
+        # `fused_params["optimizer"]`. Without that tag, torchrec falls back to
+        # fbgemm's default OptimType.EXACT_SGD for every table on XPU,
+        # silently ignoring the configured sparse optimizer (e.g.
+        # RowWiseAdagrad). Pass the same optimizer info directly to the
+        # sharders instead, so the fused optimizer is still selected correctly.
+        xpu_fused_params = dict(sparse_opt_args)
+        if "lr" in xpu_fused_params:
+            xpu_fused_params["learning_rate"] = xpu_fused_params.pop("lr")
+        xpu_fused_params["optimizer"] = optimizer_type_to_emb_opt_type(sparse_opt_cls)
+        sharders = [
+            EmbeddingBagCollectionSharder(fused_params=xpu_fused_params)
+            if type(sharder) is EmbeddingBagCollectionSharder
+            else (
+                EmbeddingCollectionSharder(fused_params=xpu_fused_params)
+                if type(sharder) is EmbeddingCollectionSharder
+                else sharder
+            )
+            for sharder in get_default_sharders()
+        ]
     compute_device = device.type if device.type in ("cuda", "xpu") else "cpu"
-
-    from torchrec.distributed.planner.constants import (
-        detect_hbm_cap,
-        detect_hbm_mem_bw,
-    )
-
-    hbm_cap = detect_hbm_cap(compute_device, device.index or 0) if device.type in ("cuda", "xpu") else 0
-    hbm_mem_bw = detect_hbm_mem_bw(compute_device, device.index or 0)
 
     planner = EmbeddingShardingPlanner(
         topology=Topology(
             local_world_size=world_size,
             world_size=world_size,
             compute_device=compute_device,
-            hbm_cap=hbm_cap,
+            hbm_cap=160 * 1024 * 1024 * 1024,
             ddr_cap=32 * 1024 * 1024 * 1024,
-            hbm_mem_bw=hbm_mem_bw,
         ),
     )
     pg = dist.GroupMember.WORLD
