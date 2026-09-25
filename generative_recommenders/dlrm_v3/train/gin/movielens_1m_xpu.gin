@@ -40,7 +40,7 @@ sparse_optimizer_factory_and_class.betas = (0.95, 0.999)
 make_train_test_dataloaders.batch_size = %batch_size
 make_train_test_dataloaders.dataset_type = %dataset
 make_train_test_dataloaders.train_split_percentage = 0.75
-make_train_test_dataloaders.new_path_prefix = "/workspace/src/generative-recommenders/datasets"
+make_train_test_dataloaders.new_path_prefix = "/opt/dlrmv3/src/generative-recommenders/datasets"
 make_train_test_dataloaders.num_workers = 0  # XPU doesn't support multiprocessing workers
 make_train_test_dataloaders.prefetch_factor = None  # Required when num_workers=0
 
