@@ -6,7 +6,8 @@
 #
 # Environment overrides:
 #   DATA_DIR     directory containing data/<dataset>/   (default: <repo>/datasets)
-#   RUN_DIR      where run.gin and run.log are written  (default: <repo>/exps/xpu_runs/<ts>-...)
+#   RUN_DIR      run output: run.gin, run.log, manifest.json, operative_config.gin
+#                (default: <repo>/exps/xpu_runs/<ts>-...)
 #   ONEAPI_ROOT  oneAPI install sourced if not already active (default: /opt/intel/oneapi)
 #
 # Phases:
@@ -23,6 +24,7 @@ PHASE="${PHASE:-1}"
 DATASET="${DATASET:-movielens-1m}"
 MODE="${MODE:-train-eval}"
 GIN_CONFIG=""
+LAUNCH_COMMAND="$0 $*"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -62,6 +64,8 @@ DATA_DIR="${DATA_DIR:-${SCRIPT_DIR}/datasets}"
 RUN_DIR="${RUN_DIR:-${SCRIPT_DIR}/exps/xpu_runs/$(date +%Y%m%d-%H%M%S)-phase${PHASE}-${MODE}}"
 mkdir -p "${RUN_DIR}"
 exec > >(tee "${RUN_DIR}/run.log") 2>&1
+# train_ranker.py writes operative_config.gin here.
+export DLRMV3_RUN_DIR="${RUN_DIR}"
 export HSTU_EMBEDDING_DIM="${HSTU_EMBEDDING_DIM:-64}"
 export HASH_SIZE="${HASH_SIZE:-1000000}"
 export ZE_FLAT_DEVICE_HIERARCHY="${ZE_FLAT_DEVICE_HIERARCHY:-COMPOSITE}"
@@ -142,6 +146,19 @@ include '${GIN_BASE}'
 make_train_test_dataloaders.new_path_prefix = "${DATA_DIR}"
 EOF
 GIN_ARGS="--gin_config_file ${RUN_GIN}"
+
+# Component revisions, runtime and env for this run. Written before training
+# so that failed runs are traceable too; a run without it is not started.
+echo "=== Run manifest: ${RUN_DIR}/manifest.json ==="
+python "${SCRIPT_DIR}/write_run_manifest.py" \
+    --out "${RUN_DIR}/manifest.json" \
+    --command "${LAUNCH_COMMAND}" \
+    --phase "${PHASE}" \
+    --mode "${MODE}" \
+    --dataset "${DATASET}" \
+    --gin "${GIN_BASE}" \
+    --data-dir "${DATA_DIR}" ||
+    { echo "ERROR: writing the run manifest failed."; exit 1; }
 
 # ------------------------------------------------------------------
 # Phase execution
