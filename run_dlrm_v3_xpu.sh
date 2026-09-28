@@ -4,6 +4,11 @@
 # Usage:
 #   bash run_dlrm_v3_xpu.sh [--phase 1|2|3] [--dataset movielens-1m-xpu] [--mode train-eval]
 #
+# Environment overrides:
+#   DATA_DIR     directory containing data/<dataset>/   (default: <repo>/datasets)
+#   RUN_DIR      where run.gin and run.log are written  (default: <repo>/exps/xpu_runs/<ts>-...)
+#   ONEAPI_ROOT  oneAPI install sourced if not already active (default: /opt/intel/oneapi)
+#
 # Phases:
 #   1  Single XPU, no DMP (validates model + ops)
 #   2  Single XPU with DMP (validates sharding pipeline)
@@ -31,24 +36,32 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ------------------------------------------------------------------
-# Environment activation (set -u disabled: setvars.sh and conda.sh
-# reference unset variables internally)
+# Environment activation. The Python environment is whatever `python`
+# resolves to (the container's /opt/venv/mybuild is already on PATH).
+# set -u stays off until after setvars.sh, which references unset vars.
 # ------------------------------------------------------------------
 echo "=== Activating Intel oneAPI ==="
-#source /opt/intel/oneapi/setvars.sh --force 2>/dev/null || true
-source /opt/intel/oneapi/2025.3/oneapi-vars.sh --force 2>/dev/null || true
+ONEAPI_ROOT="${ONEAPI_ROOT:-/opt/intel/oneapi}"
+if [[ "${SETVARS_COMPLETED:-}" == "1" ]]; then
+    echo "  already active (SETVARS_COMPLETED=1)"
+elif [[ -f "${ONEAPI_ROOT}/setvars.sh" ]]; then
+    source "${ONEAPI_ROOT}/setvars.sh" --force > /dev/null ||
+        { echo "ERROR: sourcing ${ONEAPI_ROOT}/setvars.sh failed."; exit 1; }
+else
+    echo "ERROR: ${ONEAPI_ROOT}/setvars.sh not found. Set ONEAPI_ROOT."
+    exit 1
+fi
 
-echo "=== Activating conda environment ==="
-#source /opt/miniforge/etc/profile.d/conda.sh
-#conda activate dlrmV3-v3
-
-# Re-enable nounset now that activation is done
 set -u
 
 # ------------------------------------------------------------------
 # XPU-specific environment variables
 # ------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+DATA_DIR="${DATA_DIR:-${SCRIPT_DIR}/datasets}"
+RUN_DIR="${RUN_DIR:-${SCRIPT_DIR}/exps/xpu_runs/$(date +%Y%m%d-%H%M%S)-phase${PHASE}-${MODE}}"
+mkdir -p "${RUN_DIR}"
+exec > >(tee "${RUN_DIR}/run.log") 2>&1
 export HSTU_EMBEDDING_DIM="${HSTU_EMBEDDING_DIM:-64}"
 export HASH_SIZE="${HASH_SIZE:-1000000}"
 export ZE_FLAT_DEVICE_HIERARCHY="${ZE_FLAT_DEVICE_HIERARCHY:-COMPOSITE}"
@@ -82,6 +95,8 @@ echo "  HASH_SIZE            = ${HASH_SIZE}"
 echo "  Phase                = ${PHASE}"
 echo "  Dataset              = ${DATASET}"
 echo "  Mode                 = ${MODE}"
+echo "  DATA_DIR             = ${DATA_DIR}"
+echo "  RUN_DIR              = ${RUN_DIR}"
 
 # ------------------------------------------------------------------
 # Detect available XPU devices
@@ -110,12 +125,23 @@ TRAIN_SCRIPT="${SCRIPT_DIR}/generative_recommenders/dlrm_v3/train/train_ranker.p
 # Default gin config for XPU (unless overridden via --gin)
 DEFAULT_GIN="${SCRIPT_DIR}/generative_recommenders/dlrm_v3/train/gin/movielens_1m_xpu.gin"
 
-GIN_ARGS=""
-if [[ -n "${GIN_CONFIG}" ]]; then
-    GIN_ARGS="--gin_config_file ${GIN_CONFIG}"
-else
-    GIN_ARGS="--gin_config_file ${DEFAULT_GIN}"
+GIN_BASE="$(realpath -e "${GIN_CONFIG:-${DEFAULT_GIN}}")" ||
+    { echo "ERROR: gin config not found: ${GIN_CONFIG:-${DEFAULT_GIN}}"; exit 1; }
+
+# The dataset loader resolves <new_path_prefix>/data/<dataset>/..., so the
+# prefix must point at a directory containing data/.
+if [[ "${DATASET}" == movielens-1m && ! -f "${DATA_DIR}/data/ml-1m/sasrec_format.csv" ]]; then
+    echo "ERROR: ${DATA_DIR}/data/ml-1m/sasrec_format.csv not found. Set DATA_DIR."
+    exit 1
 fi
+
+# Per-run gin: the base config with its data path overridden for this host.
+RUN_GIN="${RUN_DIR}/run.gin"
+cat > "${RUN_GIN}" <<EOF
+include '${GIN_BASE}'
+make_train_test_dataloaders.new_path_prefix = "${DATA_DIR}"
+EOF
+GIN_ARGS="--gin_config_file ${RUN_GIN}"
 
 # ------------------------------------------------------------------
 # Phase execution
