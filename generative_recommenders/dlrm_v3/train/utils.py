@@ -50,6 +50,7 @@ from generative_recommenders.dlrm_v3.configs import (
     get_hstu_configs,
 )
 from generative_recommenders.dlrm_v3.datasets.dataset import collate_fn, Dataset
+from generative_recommenders.dlrm_v3.harness import record_loss
 from generative_recommenders.dlrm_v3.utils import get_dataset, MetricsLogger, Profiler
 from generative_recommenders.common import HammerKernel
 from generative_recommenders.modules.dlrm_hstu import DlrmHSTU, DlrmHSTUConfig
@@ -552,6 +553,7 @@ def train_loop(
             # pyre-ignore
             sum(aux_losses.values()).backward()
             optimizer.step()
+            record_loss(rank, batch_idx, aux_losses)
             metric_logger.update(
                 mode="train",
                 predictions=mt_target_preds,
@@ -693,6 +695,7 @@ def train_eval_loop(
             _loss = sum(aux_losses.values())
             _loss.backward()
             optimizer.step()
+            record_loss(rank, train_batch_idx, aux_losses)
             metric_logger.update(
                 mode="train",
                 predictions=mt_target_preds,

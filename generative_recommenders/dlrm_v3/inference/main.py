@@ -826,8 +826,7 @@ def main() -> None:
     )
     gin.parse_config_file(gin_path)
     # Same rule as train_ranker.py, so inference builds the trained model.
-    if torch.accelerator.current_accelerator().type == "xpu":
-        apply_size_overrides()
+    apply_size_overrides(torch.accelerator.current_accelerator().type)
     write_operative_config(rank=0, operative=False)
     try:
         run(dataset=args.dataset)

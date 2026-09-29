@@ -48,6 +48,9 @@ def git_info(path: Path) -> Optional[Dict[str, Any]]:
     # Untracked files are not counted: builds generate some (torchrec/version.py).
     modified = _git(Path(top), "status", "--porcelain", "--untracked-files=no") or ""
     modified_files = [line[3:] for line in modified.splitlines()]
+    # Identifies the uncommitted changes, so two dirty runs of the same SHA
+    # can be told apart.
+    diff = _git(Path(top), "diff", "HEAD") if modified_files else None
     return {
         "path": top,
         "sha": _git(Path(top), "rev-parse", "HEAD"),
@@ -55,6 +58,7 @@ def git_info(path: Path) -> Optional[Dict[str, Any]]:
         "commit_time_utc": _iso(int(_git(Path(top), "log", "-1", "--format=%ct") or 0)),
         "dirty": bool(modified_files),
         "modified_files": modified_files[:MAX_LISTED_FILES],
+        "diff_sha256": hashlib.sha256(diff.encode()).hexdigest() if diff else None,
     }
 
 
@@ -207,6 +211,7 @@ def main() -> None:
     ap.add_argument("--command", required=True)
     ap.add_argument("--phase", required=True)
     ap.add_argument("--mode", required=True)
+    ap.add_argument("--device", required=True)
     ap.add_argument("--dataset", required=True)
     ap.add_argument("--gin", required=True)
     ap.add_argument("--data-dir", required=True)
@@ -221,6 +226,7 @@ def main() -> None:
             "command": args.command,
             "phase": args.phase,
             "mode": args.mode,
+            "device": args.device,
             "dataset": args.dataset,
             "gin_base": args.gin,
             "data_dir": args.data_dir,

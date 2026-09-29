@@ -2,16 +2,47 @@
 """Run-harness helpers shared by the train and inference entry points."""
 
 import os
+import random
+from typing import Dict
 
 import gin
+import numpy as np
+import torch
 
 
-def apply_size_overrides() -> None:
+@gin.configurable
+def seed_everything(seed: int = 0) -> None:
+    """Seed python, numpy and torch (CPU and all accelerators)."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+
+def record_loss(rank: int, step: int, losses: Dict[str, torch.Tensor]) -> None:
+    """Rank 0 appends this step's losses to $DLRMV3_RUN_DIR/losses.csv."""
+    run_dir = os.environ.get("DLRMV3_RUN_DIR")
+    if rank != 0 or not run_dir:
+        return
+    path = os.path.join(run_dir, "losses.csv")
+    names = sorted(losses)
+    values = [float(losses[k].detach().float()) for k in names]
+    new_file = not os.path.exists(path)
+    with open(path, "a") as f:
+        if new_file:
+            f.write(",".join(["step", *names, "total"]) + "\n")
+        f.write(",".join([str(step), *map(repr, values), repr(sum(values))]) + "\n")
+
+
+def apply_size_overrides(device_type: str) -> None:
     """Set configs.HSTU_EMBEDDING_DIM / HASH_SIZE from the environment.
 
     They are shared between get_hstu_configs() and get_embedding_table_config()
     in configs.py, so they are module globals rather than gin bindings.
+    Applied on XPU (defaults sized for XPU memory) and, on any other device,
+    when either variable is set, so a CPU reference builds the same model.
     """
+    if device_type != "xpu" and not {"HSTU_EMBEDDING_DIM", "HASH_SIZE"} & set(os.environ):
+        return
     import generative_recommenders.dlrm_v3.configs as configs
 
     configs.HSTU_EMBEDDING_DIM = int(os.environ.get("HSTU_EMBEDDING_DIM", "64"))

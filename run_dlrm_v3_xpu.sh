@@ -3,11 +3,17 @@
 #
 # Usage:
 #   bash run_dlrm_v3_xpu.sh [--phase 1|2|3] [--dataset movielens-1m] [--mode MODE] [--gin FILE]
+#                           [--device xpu|cpu]
 #
 # Modes:
 #   train | eval | train-eval | streaming-train-eval   train_ranker.py (default: train-eval)
 #   infer   unquantized inference via inference/main.py (MLPerf LoadGen);
 #           phase 1 only; LoadGen's mlperf_log_* files are written to RUN_DIR
+#
+# Devices:
+#   xpu     default
+#   cpu     CPU reference for the XPU loss curve: phase 1, training modes only;
+#           compare with compare_loss_curves.py
 #
 # Environment overrides:
 #   DATA_DIR     directory containing data/<dataset>/   (default: <repo>/datasets)
@@ -28,6 +34,7 @@ set -eo pipefail
 PHASE="${PHASE:-1}"
 DATASET="${DATASET:-movielens-1m}"
 MODE="${MODE:-train-eval}"
+DEVICE="${DEVICE:-xpu}"
 GIN_CONFIG=""
 LAUNCH_COMMAND="$0 $*"
 
@@ -38,9 +45,19 @@ while [[ $# -gt 0 ]]; do
         --dataset) DATASET="$2"; shift 2 ;;
         --mode)    MODE="$2";    shift 2 ;;
         --gin)     GIN_CONFIG="$2"; shift 2 ;;
+        --device)  DEVICE="$2";  shift 2 ;;
         *)         echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
+
+case "${DEVICE}" in
+    xpu) ;;
+    cpu)
+        [[ "${PHASE}" == 1 && "${MODE}" != infer ]] ||
+            { echo "ERROR: --device cpu supports --phase 1 training modes only."; exit 1; }
+        ;;
+    *) echo "ERROR: Unknown device '${DEVICE}'. Use xpu or cpu."; exit 1 ;;
+esac
 
 # ------------------------------------------------------------------
 # Environment activation. The Python environment is whatever `python`
@@ -66,7 +83,7 @@ set -u
 # ------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DATA_DIR="${DATA_DIR:-${SCRIPT_DIR}/datasets}"
-RUN_DIR="${RUN_DIR:-${SCRIPT_DIR}/exps/xpu_runs/$(date +%Y%m%d-%H%M%S)-phase${PHASE}-${MODE}}"
+RUN_DIR="${RUN_DIR:-${SCRIPT_DIR}/exps/xpu_runs/$(date +%Y%m%d-%H%M%S)-phase${PHASE}-${MODE}-${DEVICE}}"
 mkdir -p "${RUN_DIR}"
 exec > >(tee "${RUN_DIR}/run.log") 2>&1
 # train_ranker.py writes operative_config.gin here.
@@ -104,6 +121,7 @@ echo "  HASH_SIZE            = ${HASH_SIZE}"
 echo "  Phase                = ${PHASE}"
 echo "  Dataset              = ${DATASET}"
 echo "  Mode                 = ${MODE}"
+echo "  Device               = ${DEVICE}"
 echo "  DATA_DIR             = ${DATA_DIR}"
 echo "  RUN_DIR              = ${RUN_DIR}"
 
@@ -115,7 +133,7 @@ NUM_XPUS="${NUM_XPUS:-${_DETECTED_XPUS}}"
 echo "  XPU devices found  = ${_DETECTED_XPUS}"
 echo "  NUM_XPUS (used)    = ${NUM_XPUS}"
 
-if [[ "${NUM_XPUS}" -eq 0 ]]; then
+if [[ "${DEVICE}" == xpu && "${NUM_XPUS}" -eq 0 ]]; then
     echo "ERROR: No XPU devices found. Ensure PyTorch+XPU is installed and Intel GPU drivers are loaded."
     exit 1
 fi
@@ -168,6 +186,7 @@ python "${SCRIPT_DIR}/write_run_manifest.py" \
     --command "${LAUNCH_COMMAND}" \
     --phase "${PHASE}" \
     --mode "${MODE}" \
+    --device "${DEVICE}" \
     --dataset "${DATASET}" \
     --gin "${GIN_BASE}" \
     --data-dir "${DATA_DIR}" ||
@@ -194,11 +213,11 @@ fi
 # ------------------------------------------------------------------
 case "${PHASE}" in
     1)
-        echo "=== Phase 1: Single XPU, world_size=1 ==="
+        echo "=== Phase 1: single ${DEVICE}, world_size=1 ==="
         python "${TRAIN_SCRIPT}" \
             --dataset "${DATASET}" \
             --mode "${MODE}" \
-            --device_type xpu \
+            --device_type "${DEVICE}" \
             --world_size 1 \
             ${GIN_ARGS}
         ;;

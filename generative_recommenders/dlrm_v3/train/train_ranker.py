@@ -27,6 +27,7 @@ import torch
 from generative_recommenders.dlrm_v3.checkpoint import load_dmp_checkpoint
 from generative_recommenders.dlrm_v3.harness import (
     apply_size_overrides,
+    seed_everything,
     write_operative_config,
 )
 from generative_recommenders.dlrm_v3.train.utils import (
@@ -84,11 +85,11 @@ def _main_func(
     )
     # parse all arguments
     gin.parse_config_file(gin_file)
+    seed_everything()
 
-    # XPU: HSTU_EMBEDDING_DIM/HASH_SIZE come from the environment. All other
-    # HSTU dims are configurable via gin (get_hstu_configs.* bindings).
-    if device_type == "xpu":
-        apply_size_overrides()
+    # HSTU_EMBEDDING_DIM/HASH_SIZE come from the environment (see harness.py).
+    # All other HSTU dims are configurable via gin (get_hstu_configs.* bindings).
+    apply_size_overrides(device_type)
     write_operative_config(rank, operative=False)
 
     model, model_configs, embedding_table_configs = make_model()
