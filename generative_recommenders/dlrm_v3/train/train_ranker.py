@@ -25,6 +25,10 @@ import gin
 import torch
 
 from generative_recommenders.dlrm_v3.checkpoint import load_dmp_checkpoint
+from generative_recommenders.dlrm_v3.harness import (
+    apply_size_overrides,
+    write_operative_config,
+)
 from generative_recommenders.dlrm_v3.train.utils import (
     cleanup,
     eval_loop,
@@ -56,26 +60,6 @@ SUPPORTED_CONFIGS = {
 }
 
 
-def _write_operative_config(rank: int, operative: bool = True) -> None:
-    """Rank 0 writes the gin bindings actually used, plus the configs.py
-    globals set outside gin, to $DLRMV3_RUN_DIR (set by run_dlrm_v3_xpu.sh).
-    With operative=False (before the model is built, so that early failures
-    leave a record) all parsed bindings are written instead."""
-    run_dir = os.environ.get("DLRMV3_RUN_DIR")
-    if rank != 0 or not run_dir:
-        return
-    import generative_recommenders.dlrm_v3.configs as configs
-
-    with open(os.path.join(run_dir, "operative_config.gin"), "w") as f:
-        if not operative:
-            f.write("# PARTIAL: written before model construction; all parsed\n")
-            f.write("# bindings (gin.config_str()), not the operative config.\n\n")
-        f.write("# configs.py module globals (not gin bindings), effective values:\n")
-        f.write(f"# HSTU_EMBEDDING_DIM = {configs.HSTU_EMBEDDING_DIM}\n")
-        f.write(f"# HASH_SIZE = {configs.HASH_SIZE}\n\n")
-        f.write(gin.operative_config_str() if operative else gin.config_str())
-
-
 def _main_func(
     rank: int,
     world_size: int,
@@ -101,16 +85,11 @@ def _main_func(
     # parse all arguments
     gin.parse_config_file(gin_file)
 
-    # XPU: HSTU_EMBEDDING_DIM/HASH_SIZE are shared between get_hstu_configs()
-    # and get_embedding_table_config() in configs.py, so they must stay in
-    # sync as module-level globals rather than independent gin bindings. All
-    # other HSTU dims are configurable via gin (get_hstu_configs.* bindings).
+    # XPU: HSTU_EMBEDDING_DIM/HASH_SIZE come from the environment. All other
+    # HSTU dims are configurable via gin (get_hstu_configs.* bindings).
     if device_type == "xpu":
-        import os as _os
-        import generative_recommenders.dlrm_v3.configs as _configs
-        _configs.HSTU_EMBEDDING_DIM = int(_os.environ.get("HSTU_EMBEDDING_DIM", "64"))
-        _configs.HASH_SIZE = int(_os.environ.get("HASH_SIZE", "1000000"))
-    _write_operative_config(rank, operative=False)
+        apply_size_overrides()
+    write_operative_config(rank, operative=False)
 
     model, model_configs, embedding_table_configs = make_model()
 
@@ -191,7 +170,7 @@ def _main_func(
         cleanup()
         raise Exception(e)
     finally:
-        _write_operative_config(rank)
+        write_operative_config(rank)
 
 
 def get_args():  # pyre-ignore [3]
