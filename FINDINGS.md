@@ -5,7 +5,7 @@ it have found missing or wrong. One entry per finding: symptom, root cause,
 fix or workaround, status on the current pins, evidence, owner.
 
 **Status checked against** (2026-09-29): torchlib-xpu `b59acf9`,
-fbgemm-gpu-cpu `1.8.0`, torchrec `e213eb9`, generative-recommenders `8edcb44`,
+fbgemm-gpu-cpu `1.8.0`, torchrec `e213eb9`, generative-recommenders `ed103ac`,
 on PVC (Max 1550) in the `Dockerfile.xpu` container.
 
 **Two series.**
