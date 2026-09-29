@@ -1,0 +1,31 @@
+# Unquantized inference smoke run for DLRM-v3 on MovieLens-1M (XPU harness).
+# Checks that inference runs end to end, not performance: LoadGen will
+# report the result INVALID because the run is shorter than min_duration.
+#
+# Model shape must match train/gin/movielens_1m_xpu.gin (keep in sync);
+# HSTU_EMBEDDING_DIM / HASH_SIZE come from the environment on XPU.
+# run.dataset_path_prefix is set per host by run_dlrm_v3_xpu.sh.
+
+get_hstu_configs.hstu_num_heads = 4
+get_hstu_configs.hstu_attn_linear_dim = 64
+get_hstu_configs.hstu_attn_qk_dim = 64
+get_hstu_configs.hstu_attn_num_layers = 3
+get_hstu_configs.hstu_preprocessor_hidden_dim = 128
+get_hstu_configs.hstu_transducer_embedding_dim = 128
+
+run.model_path = ""  # no checkpoint: random weights
+run.sparse_quant = False
+# Server honours num_queries (via max_query_count); Offline sizes the run
+# from min_duration (10 min) instead.
+run.scenario_name = "Server"
+run.target_qps = 50
+run.num_queries = 256
+run.warmup_ratio = 0.02
+run.batchsize = 16
+# >1 selects MultiThreadDataProducer, which uses torch.cuda.Stream.
+run.data_producer_threads = 1
+run.compute_eval = False
+run.find_peak_performance = False
+run.output_trace = False
+run.train_split_percentage = 0.75
+run.numpy_rand_seed = 123
