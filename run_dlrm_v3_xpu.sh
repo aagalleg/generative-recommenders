@@ -2,7 +2,12 @@
 # run_dlrm_v3_xpu.sh — Multi-phase launcher for DLRM-V3 on Intel XPU
 #
 # Usage:
-#   bash run_dlrm_v3_xpu.sh [--phase 1|2|3] [--dataset movielens-1m-xpu] [--mode train-eval]
+#   bash run_dlrm_v3_xpu.sh [--phase 1|2|3] [--dataset movielens-1m] [--mode MODE] [--gin FILE]
+#
+# Modes:
+#   train | eval | train-eval | streaming-train-eval   train_ranker.py (default: train-eval)
+#   infer   unquantized inference via inference/main.py (MLPerf LoadGen);
+#           phase 1 only; LoadGen's mlperf_log_* files are written to RUN_DIR
 #
 # Environment overrides:
 #   DATA_DIR     directory containing data/<dataset>/   (default: <repo>/datasets)
@@ -125,9 +130,17 @@ fi
 # config dim overrides are set via gin (get_hstu_configs.* bindings) instead
 # of the env-var-driven monkey-patch that used to live in train_ranker.py.
 TRAIN_SCRIPT="${SCRIPT_DIR}/generative_recommenders/dlrm_v3/train/train_ranker.py"
+INFER_SCRIPT="${SCRIPT_DIR}/generative_recommenders/dlrm_v3/inference/main.py"
 
-# Default gin config for XPU (unless overridden via --gin)
-DEFAULT_GIN="${SCRIPT_DIR}/generative_recommenders/dlrm_v3/train/gin/movielens_1m_xpu.gin"
+# Default gin config for XPU (unless overridden via --gin), and the binding
+# that carries this host's data path.
+if [[ "${MODE}" == infer ]]; then
+    DEFAULT_GIN="${SCRIPT_DIR}/generative_recommenders/dlrm_v3/inference/gin/movielens_1m_xpu.gin"
+    DATA_BINDING="run.dataset_path_prefix"
+else
+    DEFAULT_GIN="${SCRIPT_DIR}/generative_recommenders/dlrm_v3/train/gin/movielens_1m_xpu.gin"
+    DATA_BINDING="make_train_test_dataloaders.new_path_prefix"
+fi
 
 GIN_BASE="$(realpath -e "${GIN_CONFIG:-${DEFAULT_GIN}}")" ||
     { echo "ERROR: gin config not found: ${GIN_CONFIG:-${DEFAULT_GIN}}"; exit 1; }
@@ -143,7 +156,7 @@ fi
 RUN_GIN="${RUN_DIR}/run.gin"
 cat > "${RUN_GIN}" <<EOF
 include '${GIN_BASE}'
-make_train_test_dataloaders.new_path_prefix = "${DATA_DIR}"
+${DATA_BINDING} = "${DATA_DIR}"
 EOF
 GIN_ARGS="--gin_config_file ${RUN_GIN}"
 
@@ -159,6 +172,22 @@ python "${SCRIPT_DIR}/write_run_manifest.py" \
     --gin "${GIN_BASE}" \
     --data-dir "${DATA_DIR}" ||
     { echo "ERROR: writing the run manifest failed."; exit 1; }
+
+# ------------------------------------------------------------------
+# Inference
+# ------------------------------------------------------------------
+if [[ "${MODE}" == infer ]]; then
+    [[ "${PHASE}" == 1 ]] || { echo "ERROR: --mode infer supports --phase 1 only."; exit 1; }
+    echo "=== Inference: single XPU, unquantized ==="
+    # WORLD_SIZE=1 selects the single-worker dense path; HSTUModelFamily
+    # otherwise uses one worker per visible device. LoadGen writes its logs
+    # to the working directory.
+    (cd "${RUN_DIR}" && WORLD_SIZE=1 python "${INFER_SCRIPT}" \
+        --dataset "${DATASET}" \
+        ${GIN_ARGS})
+    echo "=== Done (inference) ==="
+    exit 0
+fi
 
 # ------------------------------------------------------------------
 # Phase execution
