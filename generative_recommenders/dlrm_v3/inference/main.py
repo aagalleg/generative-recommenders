@@ -44,6 +44,10 @@ from generative_recommenders.dlrm_v3.datasets.dataset import Dataset, Samples
 from generative_recommenders.dlrm_v3.datasets.synthetic_streaming import (
     DLRMv3SyntheticStreamingDataset,
 )
+from generative_recommenders.dlrm_v3.harness import (
+    apply_size_overrides,
+    write_operative_config,
+)
 from generative_recommenders.dlrm_v3.inference.data_producer import (
     MultiThreadDataProducer,
     QueryItem,
@@ -51,6 +55,15 @@ from generative_recommenders.dlrm_v3.inference.data_producer import (
 )
 from generative_recommenders.dlrm_v3.inference.inference_modules import set_is_inference
 from generative_recommenders.dlrm_v3.inference.model_family import HSTUModelFamily
+
+# XPU: import fbgemm_xpu after torchrec/fbgemm_gpu (pulled in above), never
+# before -- fbgemm_gpu's op registration isn't guarded against duplicates.
+# Importing it attaches XPU kernels (e.g. asynchronous_complete_cumsum) to
+# the fbgemm ops the dense forward calls.
+try:
+    import fbgemm_xpu  # noqa: F401
+except ImportError:
+    pass
 from generative_recommenders.dlrm_v3.utils import (
     get_dataset,
     profiler_or_nullcontext,
@@ -84,6 +97,11 @@ def get_args():  # pyre-ignore [3]
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--dataset", default="debug", choices=SUPPORTED_DATASETS, help="dataset"
+    )
+    parser.add_argument(
+        "--gin_config_file",
+        default=None,
+        help="path to custom gin config file (overrides --dataset gin)",
     )
     args, unknown_args = parser.parse_known_args()
     logger.warning(f"unknown_args: {unknown_args}")
@@ -802,9 +820,19 @@ def main() -> None:
     set_verbose_level(1)
     args = get_args()
     logger.info(args)
-    gin_path = f"{os.path.dirname(__file__)}/gin/{SUPPORTED_CONFIGS[args.dataset]}"
+    gin_path = (
+        args.gin_config_file
+        or f"{os.path.dirname(__file__)}/gin/{SUPPORTED_CONFIGS[args.dataset]}"
+    )
     gin.parse_config_file(gin_path)
-    run(dataset=args.dataset)
+    # Same rule as train_ranker.py, so inference builds the trained model.
+    if torch.accelerator.current_accelerator().type == "xpu":
+        apply_size_overrides()
+    write_operative_config(rank=0, operative=False)
+    try:
+        run(dataset=args.dataset)
+    finally:
+        write_operative_config(rank=0)
 
 
 if __name__ == "__main__":
