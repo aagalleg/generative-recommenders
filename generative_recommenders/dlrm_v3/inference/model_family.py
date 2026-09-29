@@ -54,6 +54,11 @@ from torchrec.test_utils import get_free_port
 logger: logging.Logger = logging.getLogger(__name__)
 
 
+def _accelerator_device(index: int) -> torch.device:
+    """Device `index` of the available accelerator (cuda, xpu, ...)."""
+    return torch.device(torch.accelerator.current_accelerator().type, index)
+
+
 class HSTUModelFamily:
     """
     High-level interface for the HSTU model family.
@@ -85,8 +90,8 @@ class HSTUModelFamily:
             quant=sparse_quant,
         )
 
-        assert torch.cuda.is_available(), "CUDA is required for this benchmark."
-        ngpus = torch.cuda.device_count()
+        assert torch.accelerator.is_available(), "A GPU is required for this benchmark."
+        ngpus = torch.accelerator.device_count()
         self.world_size = int(os.environ.get("WORLD_SIZE", str(ngpus)))
         logger.warning(f"Using {self.world_size} GPU(s)...")
         dense_model_family_clazz = (
@@ -353,7 +358,7 @@ class ModelFamilyDenseDist:
         self.output_trace = output_trace
         self.compute_eval = compute_eval
 
-        ngpus = torch.cuda.device_count()
+        ngpus = torch.accelerator.device_count()
         self.world_size = int(os.environ.get("WORLD_SIZE", str(ngpus)))
         self.rank = 0
         os.environ["MASTER_ADDR"] = "localhost"
@@ -412,8 +417,8 @@ class ModelFamilyDenseDist:
             is_dense=True,
         ).to(torch.bfloat16)
         model.set_training_dtype(torch.bfloat16)
-        device = torch.device(f"cuda:{rank}")
-        torch.cuda.set_device(f"cuda:{rank}")
+        device = _accelerator_device(rank)
+        torch.accelerator.set_device_index(rank)
         load_nonsparse_checkpoint(
             model=model, device=device, optimizer=None, path=model_path
         )
@@ -535,7 +540,7 @@ class ModelFamilyDenseDist:
                 self.samples_q[rank].put(-1)
             return None
         rank = self.get_rank()
-        device = torch.device(f"cuda:{rank}")
+        device = _accelerator_device(rank)
         assert (
             payload_features is not None
             and num_candidates is not None
@@ -598,8 +603,8 @@ class ModelFamilyDenseSingleWorker:
         self.hstu_config = hstu_config
         self.table_config = table_config
         self.output_trace = output_trace
-        self.device: torch.device = torch.device("cuda:0")
-        torch.cuda.set_device(self.device)
+        self.device: torch.device = _accelerator_device(0)
+        torch.accelerator.set_device_index(0)
         self.profiler: Optional[Profiler] = (
             Profiler(rank=0) if self.output_trace else None
         )
