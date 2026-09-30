@@ -36,7 +36,7 @@ on 2026-09-30; H-10 cites that run.
 | [A-08](#a-08-oneccl-needs-devdriby-path-inside-containers) | oneCCL needs `/dev/dri/by-path` inside containers | Handled | platform |
 | [A-09](#a-09-movielens-download-failed-expired-tls-certificate) | MovieLens download failed: expired TLS certificate | Resolved externally | — |
 | [H-01](#h-01-xpu-kernels-are-only-registered-by-an-explicit-import-fbgemm_xpu) | XPU kernels only registered by an explicit `import fbgemm_xpu` | Worked around | torchlib-xpu |
-| [H-02](#h-02-fbgemm_xpu-extensions-have-no-rpath) | `fbgemm_xpu` extensions have no RPATH | Worked around | torchlib-xpu |
+| [H-02](#h-02-fbgemm_xpu-extensions-have-no-rpath) | `fbgemm_xpu` extensions have no RPATH | Not reached (RPATH still missing) | torchlib-xpu |
 | [H-03](#h-03-the-fbgemm-wheel-is-patched-in-place) | The FBGEMM wheel is patched in place | Open (by design) | FBGEMM / TorchRec upstreaming |
 | [H-04](#h-04-unquantized-inference-does-its-embedding-lookup-on-cpu) | Unquantized inference does its embedding lookup on CPU | Open | quantized embedding lookup work |
 | [H-05](#h-05-the-inference-runner-swallows-exceptions) | The inference runner swallows exceptions | Open | generative-recommenders upstream |
@@ -247,10 +247,11 @@ certificate (2026-09-29). Harness runs use MovieLens-1M.
 'fbgemm::asynchronous_complete_cumsum' is not currently implemented for the XPU
 device`, although torchlib-xpu has that kernel.
 
-**Root cause.** `fbgemm_xpu` registers its XPU kernels on import. Only the
-training path imported it. It must be imported after `fbgemm_gpu` / `torchrec`:
-`fbgemm_gpu`'s registration is not guarded against duplicates, so an earlier
-import aborts the process.
+**Root cause.** `fbgemm_xpu` registers its XPU kernels on import, and nothing
+imports it automatically. Only the training path imported it. Import order
+does not matter on the pins: `fbgemm_xpu/__init__.py` imports `fbgemm_gpu`
+itself before loading its extension. (An abort when importing it first was
+seen on an earlier torchlib-xpu; it does not reproduce at `b59acf9`.)
 
 **Workaround.** Guarded import in `train/utils.py` and `inference/main.py`.
 Every new entry point, including probes, needs the same.
@@ -258,15 +259,24 @@ Every new entry point, including probes, needs the same.
 **Reproduce.** Remove the import from `inference/main.py`;
 `bash run_dlrm_v3_xpu.sh --mode infer`.
 
-**Owner.** torchlib-xpu (registration hook / import-order robustness).
+**Owner.** torchlib-xpu (registration hook).
 
 ### H-02 `fbgemm_xpu` extensions have no RPATH
 
-**Symptom.** `_C.so` / `_C_training.so` cannot resolve `libtorch*.so` at import.
+**Symptom.** `_C.so` / `_C_training.so` have no RPATH/RUNPATH, so
+`libtorch*.so` resolves only if torch is already loaded. Loading the `.so`
+directly without torch (for example with `ctypes`) fails with
+`libtorch.so: cannot open shared object file`.
 
-**Workaround.** The launcher prepends torch's `lib/` to `LD_LIBRARY_PATH`.
+**Status on current pins.** Not reached: `fbgemm_xpu/__init__.py` imports
+torch before loading `_C`, so `import fbgemm_xpu` works without the workaround
+(checked 2026-09-30 with torch's `lib/` removed from `LD_LIBRARY_PATH`). The
+RPATH is still missing.
 
-**Owner.** torchlib-xpu.
+**Workaround.** The launcher prepends torch's `lib/` to `LD_LIBRARY_PATH`;
+not needed for `import fbgemm_xpu` on the pins, kept as a safeguard.
+
+**Owner.** torchlib-xpu (bake in an RPATH; low priority).
 
 ### H-03 The FBGEMM wheel is patched in place
 
@@ -297,11 +307,17 @@ lookup.
 
 ### H-05 The inference runner swallows exceptions
 
-**Symptom.** A batch that fails inside `Runner.run_one_item` logs
-`thread: failed, …` and the run continues and exits 0.
+**Symptom.** `Runner.run_one_item` catches every exception, logs
+`thread: failed, …`, and still sends predictions to LoadGen from its `finally`
+block. A failure after the prediction is unpacked is therefore swallowed: the
+run continues and exits 0. A failure inside `model.predict()` leaves
+`mt_target_preds` unset, so the `finally` block raises `UnboundLocalError`,
+which hides the original error. That error escapes LoadGen's C++ callback and
+the process dumps core (exit 139).
 
-**Status.** Open. Check `run.log` for `thread: failed` and the accuracy output,
-not the exit code.
+**Status.** Open. Check `run.log` for `thread: failed` as well as the exit code.
+On a core dump, the real error is the `thread: failed` line just before the
+`UnboundLocalError`.
 
 **Owner.** generative-recommenders upstream.
 
@@ -313,7 +329,7 @@ worker thread.
 **Workaround.** `run.data_producer_threads = 1` in
 `inference/gin/movielens_1m_xpu.gin`.
 
-**Owner.** generative-recommenders fork.
+**Owner.** generative-recommenders upstream.
 
 ### H-07 Offline scenario ignores `run.num_queries`
 
@@ -373,7 +389,10 @@ relative loss difference 0.002% over 10 steps).
 **Root cause.** `source /opt/intel/oneapi/2025.3/oneapi-vars.sh … || true`; on a
 2026.1 install the line did nothing and the run relied on the caller's shell.
 
-**Status.** Fixed in the launcher (`ONEAPI_ROOT`, hard error).
+**Status.** Fixed in the launcher (`ee644e8`): `ONEAPI_ROOT` (default
+`/opt/intel/oneapi`), version-independent `setvars.sh`, hard error if it is
+missing or fails. An already activated shell (`SETVARS_COMPLETED=1`) is used as
+is; the manifest's `runtime.oneapi` records the versions either way.
 
 **Owner.** harness.
 
