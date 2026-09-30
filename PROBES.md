@@ -16,8 +16,8 @@ and whether it still runs. Findings are in [FINDINGS.md](FINDINGS.md).
 - **One question per script.** Copy and adapt rather than parameterise.
 - **Register every new probe** in the table below: question, finding, what it
   needs, status on the current pins, date checked.
-- `import fbgemm_xpu` after `fbgemm_gpu` / `torchrec`, never before
-  ([H-01](FINDINGS.md#h-01-xpu-kernels-are-only-registered-by-an-explicit-import-fbgemm_xpu)).
+- `import fbgemm_xpu` in every probe that runs fbgemm ops on XPU; without it
+  the XPU kernels are not registered ([H-01](FINDINGS.md#h-01-xpu-kernels-are-only-registered-by-an-explicit-import-fbgemm_xpu)).
 
 ## Running a probe
 
