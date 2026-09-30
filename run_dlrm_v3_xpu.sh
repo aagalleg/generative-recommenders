@@ -22,8 +22,9 @@
 #   ONEAPI_ROOT  oneAPI install sourced if not already active (default: /opt/intel/oneapi)
 #
 # Phases:
-#   1  Single XPU, no DMP (validates model + ops)
-#   2  Single XPU with DMP (validates sharding pipeline)
+#   1  Single device, one process spawned by train_ranker.py (validates model + ops;
+#      the model is still sharded with DMP, world_size=1)
+#   2  Single XPU, one process launched by torchrun (validates the torchrun launch path)
 #   3  Multi-XPU with XCCL (validates distributed training)
 
 set -eo pipefail
@@ -222,7 +223,7 @@ case "${PHASE}" in
             ${GIN_ARGS}
         ;;
     2)
-        echo "=== Phase 2: Single XPU with DMP ==="
+        echo "=== Phase 2: single xpu via torchrun, world_size=1 ==="
         torchrun \
             --standalone \
             --nproc_per_node=1 \

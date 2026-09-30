@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import unquote, urlparse
 
 ENV_PREFIXES = ("HSTU_", "CCL_", "FI_", "ZE_")
-ENV_KEYS = ("HASH_SIZE",)
+ENV_KEYS = ("HASH_SIZE", "OMP_NUM_THREADS")
 ONEAPI_PIP_PREFIXES = (
     "intel-", "onemkl", "oneccl", "impi", "dpcpp", "tcmlib", "umf", "mkl", "tbb",
 )
