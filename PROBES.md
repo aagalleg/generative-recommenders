@@ -30,6 +30,10 @@ export LD_LIBRARY_PATH="$(python -c 'import torch,os;print(os.path.join(os.path.
 ZE_AFFINITY_MASK=0 python probes/<probe>.py [args]
 ```
 
+On a host with a CPU quota (for example a pod started with `--cpu=4`), also set
+`OMP_NUM_THREADS` to the quota before running a `cpu` variant. Otherwise torch
+sizes its thread pool from all the node's cores, and the run slows to a crawl.
+
 **Needs** in the table:
 - **pins**: runs on the current pinned revisions (see the status line in
   FINDINGS.md).
@@ -51,7 +55,8 @@ ZE_AFFINITY_MASK=0 python probes/<probe>.py [args]
   had.
 
 **Status** was measured on 2026-09-29 on the current pins, PVC one tile,
-unless marked *not run*.
+unless marked *not run*. The probes were not rerun on the B60 used for the
+harness runs of 2026-09-30.
 
 > **Do not run the `ccl` probes on a PVC across tiles** without reading
 > [A-03](FINDINGS.md#a-03-two-rank-cross-tile-xccl-took-the-card-off-the-pcie-bus):

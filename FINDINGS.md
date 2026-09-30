@@ -6,7 +6,9 @@ fix or workaround, status on the current pins, evidence, owner.
 
 **Status checked against** (2026-09-29): torchlib-xpu `b59acf9`,
 fbgemm-gpu-cpu `1.8.0`, torchrec `e213eb9`, generative-recommenders `ed103ac`,
-on PVC (Max 1550) in the `Dockerfile.xpu` container.
+on PVC (Max 1550) in the `Dockerfile.xpu` container. The harness runs were
+repeated on the same revisions on an Arc Pro B60 (fbgemm-xpu built for `bmg`)
+on 2026-09-30; H-10 cites that run.
 
 **Two series.**
 - **A- entries** come from the first end-to-end DLRM-v3 trial on PVC. That
@@ -81,9 +83,11 @@ Adam group would still turn NaN; measured on the pins with
 [`probe_nan_fp16_adam_eps.py`](probes/probe_nan_fp16_adam_eps.py): fp16 with a
 partly-zero gradient gives 1016/1024 NaN on XPU, fp32 gives 0. The pinned `train/utils.py`
 (`make_optimizer_and_shard`) still skips `init_state` and
-`apply_optimizer_in_backward` on XPU, with comments attributing the corruption
-to the XPU caching allocator. The reproduction above shows it is a dtype
-problem, so that explanation is wrong.
+`apply_optimizer_in_backward` on XPU. The `init_state` comment attributes the
+FP16 corruption to the XPU caching allocator; the reproduction above shows it
+is a dtype problem, so that explanation is wrong. The
+`apply_optimizer_in_backward` comment cites a different failure, a SIGSEGV
+during DDP/XCCL process-group init, which has not been re-checked.
 
 **Evidence.** Probes, in the order they narrowed it down: `probe_nan_tbe_init_alias.py`,
 `probe_nan_rng_initialisers.py`, `probe_nan_shard_weight_alias.py`,
@@ -344,9 +348,14 @@ directory.
 
 ### H-10 Seeded XPU training is not bit-reproducible
 
-**Symptom.** Two XPU runs with the same seed, code and config: steps 0–1
-identical, then ~1e-5 absolute drift. CPU-vs-XPU differences (mean 6.5%
-relative over 10 steps) stay below a seed change on CPU (10.1%).
+**Symptom.** Two XPU runs with the same seed, code and config are identical
+at first, then drift apart.
+- PVC, 10 steps: steps 0–1 identical, then ~1e-5 absolute drift. CPU-vs-XPU
+  differences (mean 6.5% relative) stay below a seed change on CPU (10.1%).
+- B60, full epoch (849 steps): identical up to step 21; first difference at
+  step 22 (3.6e-7); at most 3.0e-3 absolute, 0.20% mean relative, over the
+  epoch. CPU vs XPU: 3.32% mean relative over the epoch (5.2% over the first
+  10 steps), about 16 times the XPU repeat difference.
 
 **Root cause.** Not investigated; likely non-deterministic accumulation in
 backward kernels or an unseeded stochastic-rounding source (FP16 tables use
