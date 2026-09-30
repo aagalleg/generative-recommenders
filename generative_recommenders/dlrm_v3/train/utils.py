@@ -35,10 +35,9 @@ import torch
 
 import torchrec
 
-# XPU: import fbgemm_xpu after torchrec/fbgemm_gpu, never before -- fbgemm_gpu's
-# op registration isn't guarded against duplicates, so an earlier import aborts
-# the process with a c10::Error. fbgemm_xpu's own schemaExists() guard makes it
-# safe to import here, attaching XPU kernels to ops fbgemm_gpu already owns.
+# XPU: importing fbgemm_xpu attaches its XPU kernels to the fbgemm ops; nothing
+# imports it automatically. It imports fbgemm_gpu itself first, so import order
+# does not matter.
 try:
     import fbgemm_xpu  # noqa: F401
 except ImportError:

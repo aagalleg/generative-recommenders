@@ -96,11 +96,9 @@ export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
 
 # fbgemm_xpu (torchlib-xpu) native extensions (_C.so / _C_training.so) have no
 # RPATH/RUNPATH baked in and need libtorch.so/libtorch_xpu.so/libtorch_cpu.so
-# resolvable at dlopen time. fbgemm_xpu is imported lazily (in utils.py/main.py,
-# after torch/torchrec/fbgemm_gpu are already loaded — importing it earlier
-# causes a duplicate-schema-registration abort), but its
-# native extension still needs libtorch resolvable at that later import time.
-# Prepending torch's lib dir here fixes it regardless of when the import happens.
+# resolvable at dlopen time. `import fbgemm_xpu` imports torch first, so the
+# libraries are already loaded and this is not needed for a normal import; it
+# is a safeguard for anything that loads the .so without torch (FINDINGS H-02).
 # TODO(upstream): report to torchlib-xpu maintainer — _C/_C_training should
 # bake in a proper RPATH so this workaround isn't needed.
 _TORCH_LIB="$(python -c 'import torch, os; print(os.path.join(os.path.dirname(torch.__file__), "lib"))' 2>/dev/null || true)"

@@ -56,10 +56,9 @@ from generative_recommenders.dlrm_v3.inference.data_producer import (
 from generative_recommenders.dlrm_v3.inference.inference_modules import set_is_inference
 from generative_recommenders.dlrm_v3.inference.model_family import HSTUModelFamily
 
-# XPU: import fbgemm_xpu after torchrec/fbgemm_gpu (pulled in above), never
-# before -- fbgemm_gpu's op registration isn't guarded against duplicates.
-# Importing it attaches XPU kernels (e.g. asynchronous_complete_cumsum) to
-# the fbgemm ops the dense forward calls.
+# XPU: importing fbgemm_xpu attaches its XPU kernels (e.g.
+# asynchronous_complete_cumsum) to the fbgemm ops the dense forward calls;
+# nothing imports it automatically.
 try:
     import fbgemm_xpu  # noqa: F401
 except ImportError:
