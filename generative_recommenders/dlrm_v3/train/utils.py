@@ -40,6 +40,7 @@ from generative_recommenders.dlrm_v3.configs import (
 )
 from generative_recommenders.dlrm_v3.datasets.dataset import collate_fn, Dataset
 from generative_recommenders.dlrm_v3.utils import get_dataset, MetricsLogger, Profiler
+from generative_recommenders.common import HammerKernel
 from generative_recommenders.modules.dlrm_hstu import DlrmHSTU, DlrmHSTUConfig
 from torch import distributed as dist
 from torch.distributed.optim import (
@@ -68,6 +69,22 @@ TORCHREC_TYPES: Set[Type[Union[EmbeddingBagCollection, EmbeddingCollection]]] = 
     EmbeddingCollection,
 }
 
+def _is_xccl_available() -> bool:
+    try:
+        return dist.is_xccl_available()
+    except (AttributeError, RuntimeError):
+        return False
+
+
+def get_dist_backend(device: torch.device) -> str:
+    """Return the best distributed backend for the given device."""
+    if device.type == "xpu":
+        if _is_xccl_available():
+            return "xccl"
+        logger.warning("XCCL not available, falling back to gloo for XPU")
+    elif device.type == "cuda":
+        return "nccl"
+    return "gloo"
 
 def setup(
     rank: int, world_size: int, master_port: int, device: torch.device
@@ -75,12 +92,12 @@ def setup(
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = str(master_port)
 
-    BACKEND = dist.Backend.NCCL
+    BACKEND = get_dist_backend(device)
     TIMEOUT = 1800
 
     # initialize the process group
     if not dist.is_initialized():
-        dist.init_process_group("nccl", rank=rank, world_size=world_size)
+        dist.init_process_group(BACKEND, rank=rank, world_size=world_size)
 
     pg = dist.new_group(
         backend=BACKEND,
@@ -89,7 +106,10 @@ def setup(
     assert isinstance(pg, dist.ProcessGroup)
 
     # set device
-    torch.cuda.set_device(device)
+    if device.type == "xpu":
+        torch.xpu.set_device(device)
+    elif device.type == "cuda":
+        torch.cuda.set_device(device)
 
     return pg
 
@@ -178,12 +198,20 @@ def make_model(
         hstu_fp8_addmm_fwd=hstu_fp8_addmm_fwd,
     )
     table_config = get_embedding_table_config(dataset)
+    # The PYTORCH attention kernel forced below materialises a dense
+    # [B, H, N, N] score tensor; the 16384 default needs ~60 GiB, so keep N small.
+    if torch.xpu.is_available():
+        hstu_config.max_seq_len = 256
 
     model = DlrmHSTU(
         hstu_configs=hstu_config,
         embedding_tables=table_config,
         is_inference=False,
     )
+
+    # Force PYTORCH kernel on XPU — Triton HSTU attention backward crashes on XPU
+    if torch.xpu.is_available():
+        model.set_hammer_kernel(HammerKernel.PYTORCH)
 
     return (
         model,
@@ -286,7 +314,7 @@ def make_optimizer_and_shard(
         topology=Topology(
             local_world_size=world_size,
             world_size=world_size,
-            compute_device="cuda",
+            compute_device=device.type,
             hbm_cap=160 * 1024 * 1024 * 1024,
             ddr_cap=32 * 1024 * 1024 * 1024,
         )
