@@ -51,6 +51,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("utils")
 
 
+def _profiler_activities() -> List[ProfilerActivity]:  # pyre-ignore [11]
+    """Return CPU plus the available accelerator's profiler activity."""
+    if torch.xpu.is_available():
+        return [ProfilerActivity.CPU, ProfilerActivity.XPU]
+    return [ProfilerActivity.CPU, ProfilerActivity.CUDA]
+
+
 def _on_trace_ready_fn(
     rank: Optional[int] = None,
 ) -> Callable[[torch.profiler.profile], None]:
@@ -69,6 +76,17 @@ def _on_trace_ready_fn(
         pid = os.getpid()
         rank_str = f"_rank_{rank}" if rank is not None else ""
         file_name = f"libkineto_activities_{pid}_{rank_str}.json"
+        if torch.xpu.is_available():
+            # Manifold is Meta-internal; write the trace locally instead.
+            path = f"/tmp/{file_name}"
+            logger.warning(
+                p.key_averages(group_by_input_shape=True).table(
+                    sort_by="self_xpu_time_total"
+                )
+            )
+            logger.warning(f"trace file: {path}")
+            p.export_chrome_trace(path)
+            return
         manifold_path = "tree/dlrm_v3_bench"
         target_object_name = manifold_path + "/" + file_name + ".gz"
         path = f"manifold://{bucket_name}/{manifold_path}/{file_name}"
@@ -99,7 +117,7 @@ def profiler_or_nullcontext(enabled: bool, with_stack: bool):
     return (
         profile(
             # pyre-fixme[16]: Module `profiler` has no attribute `ProfilerActivity`.
-            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            activities=_profiler_activities(),
             on_trace_ready=_on_trace_ready_fn(),
             with_stack=with_stack,
         )
@@ -131,7 +149,7 @@ class Profiler:
             ),
             on_trace_ready=_on_trace_ready_fn(self.rank),
             # pyre-fixme[16]: Module `profiler` has no attribute `ProfilerActivity`.
-            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            activities=_profiler_activities(),
             record_shapes=True,
             profile_memory=False,
             with_stack=False,
@@ -142,6 +160,12 @@ class Profiler:
     def step(self) -> None:
         """Advance the profiler to the next step."""
         self._profiler.step()
+
+    def __del__(self) -> None:
+        # Stop a schedule that ended mid-warmup/active. Otherwise Kineto's XPU
+        # plugin calls PTI clearActivities() at exit, which raises
+        # PTI_ERROR_NOT_IMPLEMENTED and aborts the process.
+        self._profiler.stop()
 
 
 @gin.configurable
