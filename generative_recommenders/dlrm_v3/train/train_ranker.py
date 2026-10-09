@@ -23,6 +23,8 @@ import traceback
 
 import gin
 import torch
+import fbgemm_xpu  # noqa: F401  registers XPU kernels for fbgemm ops
+
 from generative_recommenders.dlrm_v3.checkpoint import load_dmp_checkpoint
 from generative_recommenders.dlrm_v3.train.utils import (
     cleanup,
@@ -46,6 +48,7 @@ SUPPORTED_CONFIGS = {
     "debug": "debug.gin",
     "kuairand-1k": "kuairand_1k.gin",
     "movielens-1m": "movielens_1m.gin",
+    "movielens-1m-xpu": "movielens_1m_xpu.gin",
     "movielens-20m": "movielens_20m.gin",
     "movielens-13b": "movielens_13b.gin",
     "movielens-18b": "movielens_18b.gin",
@@ -64,7 +67,14 @@ def _main_func(
     hstu_ultra: bool,
     hstu_ultra_fp8: bool,
 ) -> None:
-    device = torch.device(f"cuda:{rank}")
+
+    if torch.cuda.is_available():
+        device = torch.device(f"cuda:{rank}")
+    elif torch.xpu.is_available():
+        device = torch.device(f"xpu:{rank}")
+    else:
+        raise ValueError("Unsupported device type")
+    
     logger.info(f"rank: {rank}, world_size: {world_size}, device: {device}")
     setup(
         rank=rank,
