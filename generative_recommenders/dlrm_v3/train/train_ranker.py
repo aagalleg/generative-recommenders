@@ -38,7 +38,7 @@ from generative_recommenders.dlrm_v3.train.utils import (
     train_loop,
 )
 from generative_recommenders.dlrm_v3.utils import MetricsLogger
-from torch import multiprocessing as mp
+from torch import distributed as dist, multiprocessing as mp
 from torchrec.test_utils import get_free_port
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -96,12 +96,19 @@ def _main_func(
         hstu_config=model_configs,
         embedding_table_configs=embedding_table_configs,
     )
+    # XPU: torchrec metric syncs over XCCL segfault in oneCCL at many ranks
+    # (same freed-event bug as DDP in train/utils.py); keep metrics on CPU and
+    # sync them over gloo instead.
+    metrics_device, metrics_pg = device, None
+    if device.type == "xpu":
+        metrics_device, metrics_pg = torch.device("cpu"), dist.new_group(backend="gloo")
     metrics = MetricsLogger(
         multitask_configs=model_configs.multitask_configs,
         batch_size=train_dataloader.batch_size,
         window_size=2500,
-        device=device,
+        device=metrics_device,
         rank=rank,
+        process_group=metrics_pg,
     )
     load_dmp_checkpoint(
         model=model, optimizer=optimizer, metric_logger=metrics, device=device
@@ -124,8 +131,9 @@ def _main_func(
                 multitask_configs=model_configs.multitask_configs,
                 batch_size=train_dataloader.batch_size,
                 window_size=1000,
-                device=device,
+                device=metrics_device,
                 rank=rank,
+                process_group=metrics_pg,
             )
             eval_loop(
                 rank=rank,

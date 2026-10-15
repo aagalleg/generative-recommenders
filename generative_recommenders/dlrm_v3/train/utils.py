@@ -49,10 +49,18 @@ from torch.distributed.optim import (
 from torch.optim.optimizer import Optimizer
 from torch.utils.data import DataLoader, Dataset as TorchDataset
 from torch.utils.data.distributed import _T_co, DistributedSampler
-from torchrec.distributed.model_parallel import DistributedModelParallel
+from torchrec.distributed.model_parallel import (
+    DataParallelWrapper,
+    DistributedModelParallel,
+)
 from torchrec.distributed.planner import EmbeddingShardingPlanner, Topology
 from torchrec.distributed.sharding_plan import get_default_sharders
-from torchrec.distributed.types import ShardedTensor, ShardingEnv
+from torchrec.distributed.types import (
+    ShardedModule,
+    ShardedTensor,
+    ShardingEnv,
+    ShardingType,
+)
 from torchrec.modules.embedding_configs import EmbeddingConfig
 from torchrec.modules.embedding_modules import (
     EmbeddingBagCollection,
@@ -289,6 +297,54 @@ def sparse_optimizer_factory_and_class(
     return optimizer_cls, kwargs, optimizer_factory
 
 
+def _unsharded_tensors(module: torch.nn.Module) -> Iterator[torch.Tensor]:
+    """Parameters and buffers of `module` outside any torchrec ShardedModule."""
+    if isinstance(module, ShardedModule):
+        return
+    yield from module.parameters(recurse=False)
+    yield from module.buffers(recurse=False)
+    for child in module.children():
+        yield from _unsharded_tensors(child)
+
+
+class _XpuGradAveragingDataParallelWrapper(DataParallelWrapper):
+    """XPU replacement for torchrec's default DDP wrapper.
+
+    On XPU, DDP's XCCL gradient allreduce running inside backward, concurrently
+    with torchrec's embedding backward comms, segfaults in oneCCL (a freed SYCL
+    dependency event) at >=4 ranks. This wrapper does what DDP does at
+    construction (move the unsharded modules to the device and broadcast their
+    parameters and buffers from rank 0); gradient averaging happens after
+    backward, in the dense optimizer's step pre-hook (_average_grads_pre_step).
+    """
+
+    def wrap(
+        self,
+        dmp: DistributedModelParallel,
+        env: ShardingEnv,
+        device: torch.device,
+    ) -> None:
+        module = dmp._dmp_wrapped_module.to(device)
+        for t in _unsharded_tensors(module):
+            dist.broadcast(t.data, src=0, group=env.process_group)
+
+
+def _average_grads_pre_step(
+    optimizer: Optimizer, args: Any, kwargs: Any
+) -> None:
+    """Average the optimizer's grads across ranks, like DDP, in one allreduce.
+
+    A missing grad becomes zeros so every rank reduces the same buffer layout.
+    """
+    params = [p for group in optimizer.param_groups for p in group["params"]]
+    grads = [p.grad if p.grad is not None else torch.zeros_like(p) for p in params]
+    flat = torch._utils._flatten_dense_tensors(grads)
+    dist.all_reduce(flat)
+    flat.div_(dist.get_world_size())
+    for p, g in zip(params, torch._utils._unflatten_dense_tensors(flat, grads)):
+        p.grad = g
+
+
 def make_optimizer_and_shard(
     model: torch.nn.Module,
     device: torch.device,
@@ -325,12 +381,24 @@ def make_optimizer_and_shard(
 
     plan = planner.collective_plan(model, sharders, pg)
 
+    # XPU: no DDP (see _XpuGradAveragingDataParallelWrapper). DATA_PARALLEL
+    # tables rely on DDP to sync their weights, so they are not supported here.
+    data_parallel_wrapper = None
+    if device.type == "xpu":
+        assert not any(
+            ps.sharding_type == ShardingType.DATA_PARALLEL.value
+            for module_plan in plan.plan.values()
+            for ps in module_plan.values()
+        ), "DATA_PARALLEL embedding tables need DDP, which is disabled on XPU"
+        data_parallel_wrapper = _XpuGradAveragingDataParallelWrapper()
+
     # Shard model
     model = DistributedModelParallel(
         module=model,
         device=device,
         plan=plan,
         sharders=sharders,
+        data_parallel_wrapper=data_parallel_wrapper,
     )
     # Create keyed optimizer
     all_optimizers = []
@@ -354,12 +422,21 @@ def make_optimizer_and_shard(
         )
 
     if all_params:
+        dense_factory = dense_opt_factory
+        if device.type == "xpu":
+            # Replaces DDP's in-backward allreduce: runs on every step(), i.e.
+            # after backward has returned.
+            def dense_factory(params: Iterable[torch.Tensor]) -> Optimizer:
+                optimizer = dense_opt_factory(params)
+                optimizer.register_step_pre_hook(_average_grads_pre_step)
+                return optimizer
+
         all_optimizers.append(
             (
                 "dense",
                 KeyedOptimizerWrapper(
                     params=all_params,
-                    optim_factory=dense_opt_factory,
+                    optim_factory=dense_factory,
                 ),
             )
         )

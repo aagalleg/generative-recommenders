@@ -30,9 +30,9 @@ make_train_test_dataloaders.prefetch_factor = 4
 
 # train-eval loop variables
 train_eval_loop.num_epochs = 4
-train_eval_loop.output_trace = True
+train_eval_loop.output_trace = False
 train_eval_loop.metric_log_frequency = 10
-train_eval_loop.eval_frequency = 100  # eval every 100 train batches
+train_eval_loop.eval_frequency = 20  # eval every 100 train batches
 train_eval_loop.num_eval_batches = 20  # without this the eval loop never exits
 
 # logger variables

@@ -183,6 +183,7 @@ class MetricsLogger:
         device: Device to place metric tensors on.
         rank: Process rank for distributed training.
         tensorboard_log_path: Optional path for TensorBoard logging.
+        process_group: Optional process group for metric syncs (default: WORLD).
     """
 
     def __init__(
@@ -193,7 +194,9 @@ class MetricsLogger:
         device: torch.device,
         rank: int,
         tensorboard_log_path: str = "",
+        process_group: Optional[torch.distributed.ProcessGroup] = None,
     ) -> None:
+        self.device: torch.device = device
         self.multitask_configs: List[TaskConfig] = multitask_configs
         all_classification_tasks: List[str] = [
             task.task_name
@@ -222,6 +225,7 @@ class MetricsLogger:
                         batch_size=batch_size,
                         n_tasks=len(all_classification_tasks),
                         window_size=window_size,
+                        process_group=process_group,
                     ).to(device)
                 )
                 self.class_metrics[mode].append(
@@ -230,6 +234,7 @@ class MetricsLogger:
                         batch_size=batch_size,
                         n_tasks=len(all_classification_tasks),
                         window_size=window_size,
+                        process_group=process_group,
                     ).to(device)
                 )
                 self.class_metrics[mode].append(
@@ -238,6 +243,7 @@ class MetricsLogger:
                         batch_size=batch_size,
                         n_tasks=len(all_classification_tasks),
                         window_size=window_size,
+                        process_group=process_group,
                     ).to(device)
                 )
 
@@ -253,6 +259,7 @@ class MetricsLogger:
                         batch_size=batch_size,
                         n_tasks=len(all_regression_tasks),
                         window_size=window_size,
+                        process_group=process_group,
                     ).to(device)
                 )
                 self.regression_metrics[mode].append(
@@ -261,6 +268,7 @@ class MetricsLogger:
                         batch_size=batch_size,
                         n_tasks=len(all_regression_tasks),
                         window_size=window_size,
+                        process_group=process_group,
                     ).to(device)
                 )
 
@@ -301,6 +309,11 @@ class MetricsLogger:
             num_candidates: Number of candidates per sample (for GAUC).
             mode: Either 'train' or 'eval'.
         """
+        # No-op unless the metrics live on another device than the model.
+        predictions = predictions.to(self.device)
+        weights = weights.to(self.device)
+        labels = labels.to(self.device)
+        num_candidates = num_candidates.to(self.device)
         for metric in self.all_metrics[mode]:
             if isinstance(metric, GAUCMetricComputation):
                 metric.update(
