@@ -6,11 +6,12 @@ Multi-rank (multi-tile) DLRM-v3 training on Intel Data Center GPU Max (PVC) segf
 
 | # | Problem | Trigger | Status |
 |---|---|---|---|
-| 1 | SIGSEGV right after the first training step, at 4 or more ranks | DDP's XCCL gradient allreduce running inside `backward()` | Worked around: no DDP on XPU |
+| 1 | SIGSEGV right after the first training step, at 4 or more ranks | DDP's XCCL gradient allreduce running inside `backward()` | Worked around: no DDP on XPU (verified up to 15 ranks) |
 | 2 | SIGSEGV at the first metric sync, at 14 ranks | torchrec metric syncs over XCCL | Worked around: metrics on CPU, synced over gloo |
 | 3 | PTI warnings and failures once profiling starts | `train_eval_loop.output_trace = True` in the XPU gin file | Avoided: set it to `False` |
+| 4 | SIGSEGV in the first optimizer step at 16 ranks, with the workarounds in place | the workaround's own post-backward dense-gradient allreduce over XCCL | **Open:** use at most 15 ranks |
 
-Problems 1 and 2 have the same crash signature, in a oneCCL worker thread; the faulty layer (oneCCL, PyTorch's XCCL backend, or UR/Level Zero) is not yet known. Neither is a regression in this branch: the `feat/dlrm-v3-xpu-v1.8.0` branch crashes the same way on the current software stack.
+Problems 1, 2 and 4 have the same crash signature, in a oneCCL worker thread; the faulty layer (oneCCL, PyTorch's XCCL backend, or UR/Level Zero) is not yet known. Neither is a regression in this branch: the `feat/dlrm-v3-xpu-v1.8.0` branch crashes the same way on the current software stack.
 
 ## Environment
 
@@ -77,6 +78,8 @@ In these runs, crashes occurred only with DDP's in-backward allreduce together w
 
 **Cost:** dense gradient communication no longer overlaps backward. The throughput impact has not been measured.
 
+**Limit:** verified up to 15 ranks. At 16 ranks the workaround's own allreduce crashes (Problem 4).
+
 ## Problem 2: torchrec metric sync over XCCL
 
 **Symptom:** with Problem 1 worked around, 14-rank runs (7 cards) crash at the first metric sync: at train step 1, or at the first eval round with `train_eval_loop.eval_frequency = 20`. This happened in 4 out of 4 runs. A single 14-rank run without eval passed, but only by luck.
@@ -93,13 +96,41 @@ In these runs, crashes occurred only with DDP's in-backward allreduce together w
 
 **Cost:** one small device-to-CPU copy per step (a synchronization point), and slower metric syncs every `metric_log_frequency` steps. Not measured.
 
+## Problem 4: the workaround's allreduce at 16 ranks
+
+**Symptom:** with both workarounds in place, 16-rank runs (all 8 cards, both tiles each) segfault before any training metrics are logged. This happened in 2 out of 2 runs, about 36 s after start.
+
+**Where:**
+- In Python, rank 0 is in `_average_grads_pre_step → dist.all_reduce` (`train/utils.py`), the workaround's post-backward dense-gradient allreduce, during the first `optimizer.step()`.
+- Under gdb, the crashing rank has the same oneCCL worker stack as above (`deps_entry::update → native_event_impl::test → urEventGetInfo`), with frame #0 at an invalid address.
+- The kernel logged no segfault lines during these runs, so the signature rests on the gdb stack alone.
+
+**By rank count**, with the real model, 4 epochs, using `train/tests/xpu_e2e_multirank_check.py`:
+
+| Ranks | Cards | Result |
+|---|---|---|
+| 14 | all except card 6 | pass |
+| 14 | all except card 7 (card 6 in) | pass |
+| 15 | tiles 0–14 | pass |
+| 16 | all | SIGSEGV, 2 out of 2 |
+| 16, with `CCL_ALLREDUCE=ring` | all | SIGSEGV, same place |
+
+Every card, including card 6 and both tiles of card 7, is part of a passing configuration, so this isn't one bad card. In the tested configurations the crash starts at 16 ranks. That fits a scale-dependent trigger, as in uxlfoundation/oneCCL#224 (more than about 9 communicators per process), but we haven't counted communicators, so it's a hypothesis.
+
+**Tried:**
+- `CCL_ALLREDUCE=ring`, the workaround in intel/torch-xpu-ops#5164. oneCCL confirmed the setting (`value of CCL_ALLREDUCE changed to be ring`), but the run still crashed in the same place.
+
+**Not tried:** averaging the dense gradients over a gloo group, as the metrics workaround does. It would avoid XCCL for that collective at the cost of a CPU copy of the dense gradients every step. The embedding `all_to_all_single` calls would still use XCCL.
+
+**Current guidance:** use at most 15 ranks.
+
 ## Problem 3: profiler on XPU
 
 The branch's `train/gin/movielens_1m_xpu.gin` set `train_eval_loop.output_trace = True`; v1.8.0 had `False`. The profiler starts tracing XPU kernels (PTI) after 10 steps, and multi-rank runs then print `zeEventQueryKernelTimestamp returned: 1` warnings and misbehave. Keep `output_trace = False` on XPU. `FINDINGS.md` A-04 on the v1.8.0 branch describes a related profiler problem at shutdown.
 
 ## Operational notes
 
-- **A card failed.** During the 8-card runs, the card at PCI `0000:99:00.0` logged stalled compute engines, then `GUC: Engine reset request failed` and `Failed to reset chip`. `xpu-smi discovery` then hung. It enumerated again after a reboot, but has not been rechecked under load. Leave it out with `ZE_AFFINITY_MASK=0,1,2,3,4,5,6,7,8,9,10,11,14,15` (flat tile N is card N÷2). Check `dmesg` after multi-rank runs.
+- **A card failed once.** During the 8-card runs on 2026-10-14, the card at PCI `0000:99:00.0` (card 6, flat tiles 12–13) logged stalled compute engines, then `GUC: Engine reset request failed` and `Failed to reset chip`. `xpu-smi discovery` then hung. After a later reboot it was rechecked on 2026-10-20: it initialized cleanly, its firmware status is normal, both tiles compute correctly, and it was part of the passing 14- and 15-rank runs. To leave a card out, use `ZE_AFFINITY_MASK` (flat tile N is card N÷2), e.g. `0,1,2,3,4,5,6,7,8,9,10,11,14,15` without card 6. Check `dmesg` after multi-rank runs.
 - **The machine rebooted three times on 2026-10-16.** At least one of those reboots happened while no GPU work was running, so the cause is unknown.
 - **Orphaned ranks:** after a crash or kill, `mp.spawn` ranks can survive with parent PID 1, holding about 20 GB per tile and spinning. Check for `spawn_main` processes before trusting a new run, and remember that `timeout` only kills the launcher.
 - **Device numbering:** in the default FLAT mode PyTorch sees 16 devices (one per tile). `xpu-smi` numbers cards: use `xpu-smi dump -d <cards> -t 0,1 -m 0,18` to see per-tile utilization and memory. `N/A` means the tile is idle or power-gated.
@@ -164,10 +195,25 @@ CPU-only comparison/calibration regression tests:
 python -m pytest generative_recommenders/dlrm_v3/train/tests/xpu_e2e_ddp_consistency_test.py
 ```
 
+**Multi-rank check with the real model** (`train/tests/xpu_e2e_multirank_check.py`). The original DDP path can't run at 4 or more ranks, so there's no reference to compare against at scale. This script trains the current code on N ranks (default: all visible XPUs, 4 epochs) and checks properties that correct data-parallel training must have:
+1. completion: the run exits 0 and every rank saves its results;
+2. rank sync: final dense weights are bit-identical on every rank;
+3. learning: training NE drops by at least `--min-ne-drop` (default 5%), and all metrics are finite.
+
+`--baseline-world-size N` adds a run at N ranks and shows final NE side by side, for information only. It reuses `xpu_e2e_ddp_consistency.py`'s `--child` mode, and kills each run's process group when the run ends. Exit codes: 0 pass, 1 a check failed, 2 the run failed.
+
+```bash
+python -m generative_recommenders.dlrm_v3.train.tests.xpu_e2e_multirank_check \
+  --world-size 15 --out-dir /tmp/dlrmv3_multirank
+```
+
+Results on 2026-10-20: 14 ranks (twice, with and without card 6) and 15 ranks pass. All dense tensors were bit-identical across ranks, and training NE fell about 27% (1.022 to 0.74–0.75). 16 ranks fail with Problem 4.
+
 ## Open issues
 
 - **Report upstream** to the PyTorch XPU / oneCCL maintainers. The reproduction in `train/tests/xpu_dist_test_utils.py` (`--mode reference_ddp --world-size 4`) and the stack above are enough for a bug report.
-- **Other collectives:** the embedding `all_to_all`, the dense allreduce and the startup broadcasts still use XCCL. None crashed in these runs, but that doesn't prove they are safe.
+- **16 ranks (Problem 4):** the workaround's dense allreduce crashes at 16 ranks. Averaging the dense gradients over gloo is untested; `CCL_ALLREDUCE=ring` didn't help.
+- **Other collectives:** the embedding `all_to_all_single` calls and the startup broadcasts still use XCCL. None of them crashed in these runs, but that doesn't prove they are safe, especially at 16 ranks.
 - **Not tested:** throughput impact, checkpoint save and load, and the streaming training loops (they need the internal `streaming-*` datasets).
 - **A separate hang:** 2 ranks with row-wise sharding forced hang after step 0. This is not covered by the workarounds.
 - **When to remove the workarounds:** once the bug is fixed upstream, revert them to get DDP's overlap and on-device metrics back. The crash reproduction test signals when.
