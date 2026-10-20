@@ -96,6 +96,10 @@ In these runs, crashes occurred only with DDP's in-backward allreduce together w
 
 **Cost:** one small device-to-CPU copy per step (a synchronization point), and slower metric syncs every `metric_log_frequency` steps. Not measured.
 
+## Problem 3: profiler on XPU
+
+The branch's `train/gin/movielens_1m_xpu.gin` set `train_eval_loop.output_trace = True`; v1.8.0 had `False`. The profiler starts tracing XPU kernels (PTI) after 10 steps, and multi-rank runs then print `zeEventQueryKernelTimestamp returned: 1` warnings and misbehave. Keep `output_trace = False` on XPU.
+
 ## Problem 4: the workaround's allreduce at 16 ranks
 
 **Symptom:** with both workarounds in place, 16-rank runs (all 8 cards, both tiles each) segfault before any training metrics are logged. This happened in 2 out of 2 runs, about 36 s after start.
@@ -124,64 +128,31 @@ Every card, including card 6 and both tiles of card 7, is part of a passing conf
 
 **Current guidance:** use at most 15 ranks.
 
-## Problem 3: profiler on XPU
 
-The branch's `train/gin/movielens_1m_xpu.gin` set `train_eval_loop.output_trace = True`; v1.8.0 had `False`. The profiler starts tracing XPU kernels (PTI) after 10 steps, and multi-rank runs then print `zeEventQueryKernelTimestamp returned: 1` warnings and misbehave. Keep `output_trace = False` on XPU. `FINDINGS.md` A-04 on the v1.8.0 branch describes a related profiler problem at shutdown.
-
-## Operational notes
-
-- **A card failed once.** During the 8-card runs on 2026-10-14, the card at PCI `0000:99:00.0` (card 6, flat tiles 12–13) logged stalled compute engines, then `GUC: Engine reset request failed` and `Failed to reset chip`. `xpu-smi discovery` then hung. After a later reboot it was rechecked on 2026-10-20: it initialized cleanly, its firmware status is normal, both tiles compute correctly, and it was part of the passing 14- and 15-rank runs. To leave a card out, use `ZE_AFFINITY_MASK` (flat tile N is card N÷2), e.g. `0,1,2,3,4,5,6,7,8,9,10,11,14,15` without card 6. Check `dmesg` after multi-rank runs.
-- **The machine rebooted three times on 2026-10-16.** At least one of those reboots happened while no GPU work was running, so the cause is unknown.
-- **Orphaned ranks:** after a crash or kill, `mp.spawn` ranks can survive with parent PID 1, holding about 20 GB per tile and spinning. Check for `spawn_main` processes before trusting a new run, and remember that `timeout` only kills the launcher.
-- **Device numbering:** in the default FLAT mode PyTorch sees 16 devices (one per tile). `xpu-smi` numbers cards: use `xpu-smi dump -d <cards> -t 0,1 -m 0,18` to see per-tile utilization and memory. `N/A` means the tile is idle or power-gated.
-- **Imports:** running `train_ranker.py` directly needs `PYTHONPATH=<repo root>`.
 
 ## Tests
 
-Both tests use dlrm_v3's real `setup()`, `make_optimizer_and_shard()` and `MetricsLogger` with a small synthetic torchrec model. The shared code is in `train/tests/xpu_dist_test_utils.py`. The "reference" mode is the original code path: the workaround patched back to torchrec's default DDP wrapper.
+The current XPU test directory contains two real-model end-to-end drivers and a
+CPU-only regression test for the comparison logic. The earlier
+`xpu_workaround_consistency_test.py`, `xpu_ddp_crash_repro_test.py`, and
+`xpu_dist_test_utils.py` helpers referenced in older notes are not present in
+the current directory.
 
-**1. Consistency** (`train/tests/xpu_workaround_consistency_test.py`). On 2 ranks, where DDP works, it trains the reference and the workaround from the same seed and data and checks:
-- per-step losses and final dense and embedding weights match;
-- dense weights are bit-identical across ranks;
-- CPU/gloo metrics equal XPU/XCCL metrics.
-
-It takes about 20 s. Planting a bug (summed instead of averaged gradients) makes the weight check fail: 47% of a tensor's elements differ, by up to 157× relative.
-
-```bash
-PYTHONPATH=$PWD ZE_AFFINITY_MASK=0,1 \
-  python -m pytest generative_recommenders/dlrm_v3/train/tests/xpu_workaround_consistency_test.py
-```
-
-**2. Crash reproduction** (`train/tests/xpu_ddp_crash_repro_test.py`, opt-in). On 4 or more ranks, each mode runs in its own subprocess. The reference must crash with SIGSEGV or hang, and the workaround must finish. If the reference starts passing, the crash is probably fixed in the stack and the workarounds can be reconsidered. It's opt-in because these crashes have already led to a card that could not reset.
-
-```bash
-DLRMV3_XPU_CRASH_REPRO=1 PYTHONPATH=$PWD ZE_AFFINITY_MASK=0,1,2,3 \
-  python -m pytest generative_recommenders/dlrm_v3/train/tests/xpu_ddp_crash_repro_test.py
-```
-Set `DLRMV3_XPU_REPRO_WORLD_SIZE` to use more ranks (default 4).
-
-The tests were run with `CCL_ATL_TRANSPORT=ofi FI_PROVIDER=tcp CCL_ZE_IPC_EXCHANGE=pidfd`.
-
-**End-to-end checks with the real model** (MovieLens-1M):
-- 2 ranks, seeded, against the original code: train and eval metrics match to within the run-to-run spread. The largest window-NE difference was 6e-4 for the port, while two runs of the original differed by up to 4.4e-3.
-- 14 ranks on 7 cards with `eval_frequency = 20`: 2 out of 2 runs completed all 4 epochs, with 4 eval rounds each.
-
-The repeatable driver, `train/tests/xpu_e2e_ddp_consistency.py`, defaults to five
-reference runs and one workaround run. It compares all ten reference pairs and
-uses their largest difference per quantity as the noise floor. Reference sample
-counts and metric keys must match; a mismatch invalidates calibration. Maximum
-errors remain gated against `max(factor * noise, absolute_floor)`, while accuracy
-and GAUC remain informational. `--reference-runs 2` retains single-pair calibration;
-`--reference-runs 1` uses only absolute tolerance floors.
-
-Console output reports reference min/median/max spreads and compact new-run
-diagnostics. `summary.json` also stores every pair's diagnostics, NE median/p95
-and worst metric/step, dense RMS and per-parameter maxima, and each embedding
-shard's abs-sum/square-sum relative errors. A reference maximum greater than
-`factor` times its median pair difference triggers an outlier-sensitivity warning,
-not a separate verdict. These shared-run pairs are not independent observations,
-and the envelope is not a statistical confidence bound. RMS and percentiles are
-diagnostics only; they cannot hide an isolated maximum-error failure.
+**Consistency against the original path** (`train/tests/xpu_e2e_ddp_consistency.py`).
+This MovieLens-1M `train-eval` check is intended for 2 ranks, where the original
+DDP path works. It runs a seeded reference using torchrec's default DDP wrapper
+and XPU metrics, then the current workaround. By default it runs five
+references and one workaround, compares all ten reference pairs to calibrate
+the run-to-run noise, and checks matching sample counts and metric keys. NE,
+dense weights, and embedding checksums are gated against the calibrated
+tolerance (or absolute floors); accuracy and GAUC are informational. Set
+`--reference-runs 2` for a single-pair calibration, or `--reference-runs 1` to
+use only absolute tolerance floors. The summary includes maximum-error verdicts
+and diagnostics such as median/p95 errors, RMS errors, and worst locations.
+Reference pairs share runs, so the calibrated envelope is not a statistical
+confidence bound; unusually large reference differences produce a warning,
+not a separate verdict. RMS and percentile diagnostics do not replace the
+maximum-error gates.
 
 ```bash
 ZE_AFFINITY_MASK=0,1 python -m \
@@ -189,18 +160,34 @@ ZE_AFFINITY_MASK=0,1 python -m \
   --world-size 2 --steps 100 --out-dir /tmp/dlrmv3_consistency
 ```
 
-CPU-only comparison/calibration regression tests:
+**CPU-only comparison regression tests**:
 
 ```bash
 python -m pytest generative_recommenders/dlrm_v3/train/tests/xpu_e2e_ddp_consistency_test.py
 ```
 
-**Multi-rank check with the real model** (`train/tests/xpu_e2e_multirank_check.py`). The original DDP path can't run at 4 or more ranks, so there's no reference to compare against at scale. This script trains the current code on N ranks (default: all visible XPUs, 4 epochs) and checks properties that correct data-parallel training must have:
-1. completion: the run exits 0 and every rank saves its results;
-2. rank sync: final dense weights are bit-identical on every rank;
-3. learning: training NE drops by at least `--min-ne-drop` (default 5%), and all metrics are finite.
+These test the comparison and calibration logic only; they do not run XPU
+training.
 
-`--baseline-world-size N` adds a run at N ranks and shows final NE side by side, for information only. It reuses `xpu_e2e_ddp_consistency.py`'s `--child` mode, and kills each run's process group when the run ends. Exit codes: 0 pass, 1 a check failed, 2 the run failed.
+**Multi-rank check with the real model** (`train/tests/xpu_e2e_multirank_check.py`).
+The original DDP path can't run at 4 or more ranks, so there is no reference to
+compare against at scale. This runs the current MovieLens-1M training code on
+`--world-size` ranks (all visible XPUs and 4 epochs by default) using
+`xpu_e2e_ddp_consistency.py`'s child mode. It checks:
+1. completion: the child exits successfully, writes `metrics.jsonl`, and saves
+   `rankN.pt` results for every rank;
+2. rank sync: final dense weights match rank 0 exactly by default
+   (`--sync-tol 0`);
+3. learning: the last recorded training window NE is at least
+   `--min-ne-drop` (default 5%) below the first, and all recorded metrics are
+   finite.
+
+`--baseline-world-size N` optionally runs another rank count and displays the
+final train/eval NE side by side; this is informational because effective
+batch sizes differ. A failed baseline is reported but does not change the
+primary run's verdict. The script writes `summary.json`, kills the run's
+process group on completion or timeout, and exits 0 when all checks pass, 1
+when a check fails, or 2 when the primary run fails.
 
 ```bash
 python -m generative_recommenders.dlrm_v3.train.tests.xpu_e2e_multirank_check \
@@ -208,12 +195,3 @@ python -m generative_recommenders.dlrm_v3.train.tests.xpu_e2e_multirank_check \
 ```
 
 Results on 2026-10-20: 14 ranks (twice, with and without card 6) and 15 ranks pass. All dense tensors were bit-identical across ranks, and training NE fell about 27% (1.022 to 0.74–0.75). 16 ranks fail with Problem 4.
-
-## Open issues
-
-- **Report upstream** to the PyTorch XPU / oneCCL maintainers. The reproduction in `train/tests/xpu_dist_test_utils.py` (`--mode reference_ddp --world-size 4`) and the stack above are enough for a bug report.
-- **16 ranks (Problem 4):** the workaround's dense allreduce crashes at 16 ranks. Averaging the dense gradients over gloo is untested; `CCL_ALLREDUCE=ring` didn't help.
-- **Other collectives:** the embedding `all_to_all_single` calls and the startup broadcasts still use XCCL. None of them crashed in these runs, but that doesn't prove they are safe, especially at 16 ranks.
-- **Not tested:** throughput impact, checkpoint save and load, and the streaming training loops (they need the internal `streaming-*` datasets).
-- **A separate hang:** 2 ranks with row-wise sharding forced hang after step 0. This is not covered by the workarounds.
-- **When to remove the workarounds:** once the bug is fixed upstream, revert them to get DDP's overlap and on-device metrics back. The crash reproduction test signals when.
