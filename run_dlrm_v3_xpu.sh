@@ -7,11 +7,12 @@
 #
 # Modes:
 #   train | eval | train-eval | streaming-train-eval   train_ranker.py (default: train-eval)
-#   (inference is not ported on this branch; the PR #1 launcher's `infer` mode is not carried)
+#   infer   unquantized inference via inference/main.py (MLPerf LoadGen);
+#           phase 1 only; LoadGen's mlperf_log_* files are written to RUN_DIR
 #
 # Devices:
 #   xpu     default
-#   cpu     CPU reference for the XPU loss curve: phase 1 only;
+#   cpu     CPU reference for the XPU loss curve: phase 1, training modes only;
 #           compare with compare_loss_curves.py
 #
 # Environment overrides:
@@ -55,14 +56,11 @@ done
 case "${DEVICE}" in
     xpu) ;;
     cpu)
-        [[ "${PHASE}" == 1 ]] ||
-            { echo "ERROR: --device cpu supports --phase 1 only."; exit 1; }
+        [[ "${PHASE}" == 1 && "${MODE}" != infer ]] ||
+            { echo "ERROR: --device cpu supports --phase 1 training modes only."; exit 1; }
         ;;
     *) echo "ERROR: Unknown device '${DEVICE}'. Use xpu or cpu."; exit 1 ;;
 esac
-
-[[ "${MODE}" != infer ]] ||
-    { echo "ERROR: --mode infer is not supported on this branch (inference is not ported to XPU)."; exit 1; }
 
 # ------------------------------------------------------------------
 # Environment activation. The Python environment is whatever `python`
@@ -148,11 +146,17 @@ fi
 # train_ranker.py (harness.apply_size_overrides); get_hstu_configs is not
 # gin-configurable on this branch, so the other HSTU dims keep their defaults.
 TRAIN_SCRIPT="${SCRIPT_DIR}/generative_recommenders/dlrm_v3/train/train_ranker.py"
+INFER_SCRIPT="${SCRIPT_DIR}/generative_recommenders/dlrm_v3/inference/main.py"
 
 # Default gin config for XPU (unless overridden via --gin), and the binding
 # that carries this host's data path.
-DEFAULT_GIN="${SCRIPT_DIR}/generative_recommenders/dlrm_v3/train/gin/movielens_1m_xpu.gin"
-DATA_BINDING="make_train_test_dataloaders.new_path_prefix"
+if [[ "${MODE}" == infer ]]; then
+    DEFAULT_GIN="${SCRIPT_DIR}/generative_recommenders/dlrm_v3/inference/gin/movielens_1m_xpu.gin"
+    DATA_BINDING="run.dataset_path_prefix"
+else
+    DEFAULT_GIN="${SCRIPT_DIR}/generative_recommenders/dlrm_v3/train/gin/movielens_1m_xpu.gin"
+    DATA_BINDING="make_train_test_dataloaders.new_path_prefix"
+fi
 
 GIN_BASE="$(realpath -e "${GIN_CONFIG:-${DEFAULT_GIN}}")" ||
     { echo "ERROR: gin config not found: ${GIN_CONFIG:-${DEFAULT_GIN}}"; exit 1; }
@@ -185,6 +189,22 @@ python "${SCRIPT_DIR}/write_run_manifest.py" \
     --gin "${GIN_BASE}" \
     --data-dir "${DATA_DIR}" ||
     { echo "ERROR: writing the run manifest failed."; exit 1; }
+
+# ------------------------------------------------------------------
+# Inference
+# ------------------------------------------------------------------
+if [[ "${MODE}" == infer ]]; then
+    [[ "${PHASE}" == 1 ]] || { echo "ERROR: --mode infer supports --phase 1 only."; exit 1; }
+    echo "=== Inference: single XPU, unquantized ==="
+    # WORLD_SIZE=1 selects the single-worker dense path; HSTUModelFamily
+    # otherwise uses one worker per visible device. LoadGen writes its logs
+    # to the working directory.
+    (cd "${RUN_DIR}" && WORLD_SIZE=1 python "${INFER_SCRIPT}" \
+        --dataset "${DATASET}" \
+        ${GIN_ARGS})
+    echo "=== Done (inference) ==="
+    exit 0
+fi
 
 # ------------------------------------------------------------------
 # Phase execution

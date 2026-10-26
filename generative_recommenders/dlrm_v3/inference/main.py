@@ -44,6 +44,10 @@ from generative_recommenders.dlrm_v3.datasets.dataset import Dataset, Samples
 from generative_recommenders.dlrm_v3.datasets.synthetic_streaming import (
     DLRMv3SyntheticStreamingDataset,
 )
+from generative_recommenders.dlrm_v3.harness import (
+    apply_size_overrides,
+    write_operative_config,
+)
 from generative_recommenders.dlrm_v3.inference.data_producer import (
     MultiThreadDataProducer,
     QueryItem,
@@ -51,6 +55,14 @@ from generative_recommenders.dlrm_v3.inference.data_producer import (
 )
 from generative_recommenders.dlrm_v3.inference.inference_modules import set_is_inference
 from generative_recommenders.dlrm_v3.inference.model_family import HSTUModelFamily
+
+# XPU: importing fbgemm_xpu attaches its XPU kernels (e.g.
+# asynchronous_complete_cumsum) to the fbgemm ops the dense forward calls;
+# nothing imports it automatically.
+try:
+    import fbgemm_xpu  # noqa: F401
+except ImportError:
+    pass
 from generative_recommenders.dlrm_v3.utils import (
     get_dataset,
     profiler_or_nullcontext,
@@ -94,6 +106,11 @@ def get_args():  # pyre-ignore [3]
         "--hstu-ultra-fp8",
         action="store_true",
         help="use FP8 projection GEMMs in the HSTU Ultra stack",
+    )
+    parser.add_argument(
+        "--gin_config_file",
+        default=None,
+        help="path to custom gin config file (overrides --dataset gin)",
     )
     args, unknown_args = parser.parse_known_args()
     logger.warning(f"unknown_args: {unknown_args}")
@@ -822,15 +839,24 @@ def main() -> None:
     set_verbose_level(1)
     args = get_args()
     logger.info(args)
-    gin_path = f"{os.path.dirname(__file__)}/gin/{SUPPORTED_CONFIGS[args.dataset]}"
-    gin.parse_config_file(gin_path)
-    run(
-        dataset=args.dataset,
-        hstu_ultra_stack_name=(
-            "hstu_ultra" if args.hstu_ultra or args.hstu_ultra_fp8 else None
-        ),
-        hstu_fp8_addmm_fwd=args.hstu_ultra_fp8,
+    gin_path = (
+        args.gin_config_file
+        or f"{os.path.dirname(__file__)}/gin/{SUPPORTED_CONFIGS[args.dataset]}"
     )
+    gin.parse_config_file(gin_path)
+    # Same rule as train_ranker.py, so inference builds the trained model.
+    apply_size_overrides(torch.accelerator.current_accelerator().type)
+    write_operative_config(rank=0, operative=False)
+    try:
+        run(
+            dataset=args.dataset,
+            hstu_ultra_stack_name=(
+                "hstu_ultra" if args.hstu_ultra or args.hstu_ultra_fp8 else None
+            ),
+            hstu_fp8_addmm_fwd=args.hstu_ultra_fp8,
+        )
+    finally:
+        write_operative_config(rank=0)
 
 
 if __name__ == "__main__":
