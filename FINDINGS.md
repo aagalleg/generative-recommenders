@@ -28,8 +28,9 @@ guarded), `write_run_manifest.py` (`manifest.json`),
 `compare_loss_curves.py`, `dlrm_v3/harness.py` (`losses.csv`,
 `operative_config.gin`, `seed_everything`, `apply_size_overrides`), the
 `torch.accelerator` port of `inference/model_family.py`, and
-`inference/gin/movielens_1m_xpu.gin`. `train_ranker.py` gained
-`--device_type`, `--world_size`, `--gin_config_file` and a `torchrun` path;
+`inference/gin/movielens_1m_xpu.gin`. `train_ranker.py` follows PR #1
+(`--device_type`, `--world_size`, `--gin_config_file`, `torchrun` path), keeping
+this branch's HSTU-Ultra flags and gloo metrics group;
 `inference/main.py` gained `--gin_config_file`. Not carried: the
 gin-configurable `get_hstu_configs` (and so the model-size bindings of the
 `movielens_1m_xpu.gin` files), and PR #1's `common.py`, root `main.py` and
