@@ -236,6 +236,93 @@ CFLAGS="-std=c++14 -O3" python -m pip install .
 LOCAL_WORLD_SIZE=4 WORLD_SIZE=4 python3 generative_recommenders/dlrm_v3/inference/main.py --dataset debug
 ```
 
+### DLRM-v3 on Intel XPU (research harness)
+
+`run_dlrm_v3_xpu.sh` starts a DLRM-v3 run on an Intel GPU, in training or
+inference, and records what it ran on. It is a research harness for finding
+what is still missing on XPU. It is not a CI gate and reports no performance
+numbers. What it has found so far is in [FINDINGS.md](FINDINGS.md). The
+one-off diagnostic scripts behind those findings are indexed in
+[PROBES.md](PROBES.md).
+
+#### Set up the environment
+
+Run inside the XPU container. It provides a user-mode driver new enough for
+torch 2.14 and oneAPI under `/opt/intel/oneapi` (FINDINGS A-07). Install the
+four pinned components with `install_dlrmv3.sh`. It lives in the DLRM-v3
+workspace next to `src/`, not in this repository. It installs torch
+`2.14.1+xpu`, fbgemm-gpu-cpu `1.9.0`, fbgemm-xpu from torchlib-xpu, the TorchRec
+fork, and this repository, and it downloads MovieLens-1M into `datasets/`.
+
+The fork branches are not pushed. Move them to the test host as git bundles,
+which keeps the commit SHAs:
+
+```bash
+# on the development host
+git -C src/generative-recommenders bundle create /tmp/generative-recommenders.bundle \
+    probes/dlrm-v3-xpu-fbgemmv1.9.0
+scp /tmp/generative-recommenders.bundle <test-host>:/tmp/
+
+# on the test host, inside the container
+source /opt/intel/oneapi/setvars.sh
+GENREC_BUNDLE=/tmp/generative-recommenders.bundle bash install_dlrmv3.sh
+```
+
+`TORCHREC_BUNDLE` and `TORCHLIB_XPU_BUNDLE` work the same way. The installer
+checks out the pinned SHA and stops if it differs.
+
+#### Run
+
+From the root of this repository:
+
+```bash
+bash run_dlrm_v3_xpu.sh --mode train-eval     # training on one XPU (default: phase 1)
+bash run_dlrm_v3_xpu.sh --mode infer          # unquantized inference on one XPU (MLPerf LoadGen)
+```
+
+| Option | Values |
+| --- | --- |
+| `--mode` | `train`, `eval`, `train-eval` (default), `streaming-train-eval`, or `infer` |
+| `--phase` | `1` (default): one process. `2`: one XPU under `torchrun`. `3`: all XPUs over XCCL; refuses to start unless `DLRMV3_ALLOW_MULTI_TILE=1` (FINDINGS A-03) |
+| `--device` | `xpu` (default), or `cpu` for the reference run (phase 1, training only) |
+| `--gin`, `--dataset` | gin file (default: `train/gin/movielens_1m_xpu.gin` or `inference/gin/movielens_1m_xpu.gin`) and dataset (default `movielens-1m`) |
+
+Environment: `DATA_DIR` (directory containing `data/ml-1m/`, default
+`<repo>/datasets`), `RUN_DIR` (default `exps/xpu_runs/<timestamp>-...`),
+`ONEAPI_ROOT`, `HSTU_EMBEDDING_DIM` (default 64) and `HASH_SIZE` (default
+1,000,000).
+
+Each run folder contains:
+
+- `manifest.json`: the revisions of torchlib-xpu, FBGEMM, TorchRec and
+  generative-recommenders, with dirty state, plus the runtime and environment.
+  It is written before the run starts, so failed runs are recorded too.
+- `run.gin` and `operative_config.gin`: the config the run was given and the
+  config it actually used.
+- `run.log`.
+- `losses.csv` for training (loss per step), or the `mlperf_log_*` files for
+  inference.
+
+Before relying on the torchlib-xpu SHA in the manifest, read FINDINGS H-16.
+
+#### Compare against CPU
+
+```bash
+bash run_dlrm_v3_xpu.sh --mode train --device cpu        # CPU reference, same model
+python compare_loss_curves.py <xpu-run-dir> <cpu-run-dir> [--repeat <xpu-run-dir-2>]
+```
+
+It writes `loss_diff.txt` and `loss_diff.json` into the XPU run folder. It
+exits 1 if a loss is not finite, or if the two runs were built from different
+revisions or configs.
+
+For inference, set `run.compute_eval = True` in a gin file that includes the
+inference gin. Then score the predictions:
+
+```bash
+python generative_recommenders/dlrm_v3/inference/accuracy.py --path <run-dir>/mlperf_log_accuracy.json
+```
+
 ## License
 This codebase is Apache 2.0 licensed, as found in the [LICENSE](LICENSE) file.
 

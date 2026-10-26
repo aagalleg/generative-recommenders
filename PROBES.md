@@ -66,7 +66,7 @@ sizes its thread pool from all the node's cores, and the run slows to a crawl.
   had.
 
 **Status** was measured on 2026-10-26 on the current pins (see FINDINGS.md:
-torch 2.14.1, fbgemm-gpu-cpu 1.9.0, fbgemm-xpu built 2026-10-20 from the torchlib-xpu checkout (now `2655c44`),
+torch 2.14.1, fbgemm-gpu-cpu 1.9.0, fbgemm-xpu built from torchlib-xpu `264f0c3`,
 torchrec `c0fc555`), PVC one tile (`ZE_AFFINITY_MASK=0`), unless marked *not
 run*. The previous status (2026-09-29, fbgemm 1.8.0, torch 2.13) is quoted
 where it differs. The probes were not rerun on a B60. The `cpu` / `xpu` probes were run once

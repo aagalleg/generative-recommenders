@@ -6,12 +6,15 @@ fix or workaround, status on the current pins, evidence, owner.
 
 **Status checked against** (2026-10-26, branch
 `probes/dlrm-v3-xpu-fbgemmv1.9.0`): torch `2.14.1+xpu`, fbgemm-gpu-cpu
-`1.9.0`, fbgemm-xpu `0.9.0` (`.so` built 2026-10-20 from the torchlib-xpu
-checkout, now at `2655c44`; `install_dlrmv3.sh` pins `264f0c3`, which is 2
-commits older, and the wheel does not record the SHA it was built from),
-torchrec `1.10.0a0+c0fc555` (the checkout is at `56c531e`, a later commit),
-generative-recommenders `fad127f` plus the harness files, on one tile of a PVC
-(Max 1550), oneAPI 2026.1.
+`1.9.0`, fbgemm-xpu `0.9.0` built from torchlib-xpu `264f0c3` (the
+`install_dlrmv3.sh` pin), torchrec `1.10.0a0+c0fc555` (the pin), and
+generative-recommenders at the tip of this branch, on one tile of a PVC
+(Max 1550), oneAPI 2026.1. The `.so` files are stamped 2026-10-20 18:49. The
+torchlib-xpu reflog shows its checkout was at `264f0c3` from 18:47 that day and
+only moved to `main` (`2655c44`) on 2026-10-23, with no rebuild. The torchrec
+checkout likewise moved from `c0fc555` to `56c531e` (a docstring-only commit)
+after the install. The run manifests on this host therefore name the wrong
+torchlib-xpu SHA ([H-16](#h-16-the-manifest-records-the-torchlib-xpu-checkout-not-the-revision-the-so-was-built-from)).
 This replaces the previous check (2026-09-29: torchlib-xpu `b59acf9`,
 fbgemm-gpu-cpu `1.8.0`, torch 2.13, torchrec `e213eb9`, generative-recommenders
 `ed103ac`; plus B60 harness runs of 2026-09-30, which H-10 still cites).
@@ -19,19 +22,24 @@ fbgemm-gpu-cpu `1.8.0`, torch 2.13, torchrec `e213eb9`, generative-recommenders
 **What this branch carries.** It is based on the v1.9.0 minimal XPU port, not
 on the harness branch of
 [PR #1](https://github.com/aagalleg/generative-recommenders/pull/1). The run
-harness of PR #1 has been added to it, without the inference half:
-`run_dlrm_v3_xpu.sh` (phases 1–3, `--device cpu`; no `infer` mode; phase 3
+harness of PR #1 has been added to it, with its inference half:
+`run_dlrm_v3_xpu.sh` (phases 1–3, `--device cpu`, `--mode infer`; phase 3
 guarded), `write_run_manifest.py` (`manifest.json`),
-`compare_loss_curves.py`, and `dlrm_v3/harness.py` (`losses.csv`,
-`operative_config.gin`, `seed_everything`, `apply_size_overrides`).
-`train_ranker.py` gained `--device_type`, `--world_size`,
-`--gin_config_file` and a `torchrun` path. Not carried: inference, the
-`movielens_1m_xpu.gin` model-size bindings, and the gin-configurable
-`get_hstu_configs` (it is still not configurable here). `apply_size_overrides`
-differs from PR #1: it acts only when `HSTU_EMBEDDING_DIM` or `HASH_SIZE` is
-set (the launcher always sets them), so a direct `train_ranker.py` run keeps
-the stock 512 / 10M sizes. So "status" below is one of: *re-measured* (probe
-or run on 2026-10-26), *code read* (not run), or *not re-checked*.
+`compare_loss_curves.py`, `dlrm_v3/harness.py` (`losses.csv`,
+`operative_config.gin`, `seed_everything`, `apply_size_overrides`), the
+`torch.accelerator` port of `inference/model_family.py`, and
+`inference/gin/movielens_1m_xpu.gin`. `train_ranker.py` gained
+`--device_type`, `--world_size`, `--gin_config_file` and a `torchrun` path;
+`inference/main.py` gained `--gin_config_file`. Not carried: the
+gin-configurable `get_hstu_configs` (and so the model-size bindings of the
+`movielens_1m_xpu.gin` files), and PR #1's `common.py`, root `main.py` and
+`datasets/dataset.py` changes (the runs below did not need them).
+`apply_size_overrides` differs from PR #1: it acts only when
+`HSTU_EMBEDDING_DIM` or `HASH_SIZE` is set (the launcher always sets them), so
+a direct `train_ranker.py` run keeps the stock 512 / 10M sizes. Setup and the
+one command are in the [README](README.md#dlrm-v3-on-intel-xpu-research-harness).
+So "status" below is one of: *re-measured* (probe or run on 2026-10-26),
+*code read* (not run), or *not re-checked*.
 
 **End-to-end checks on this branch.** (1) `train_ranker.py --dataset debug
 --mode train` (`debug.gin`: 10 batches, `output_trace = True`), one tile: exit
@@ -45,6 +53,20 @@ and `losses.csv` written. The same with `--device cpu`, and a phase 2 repeat
 mean relative difference 10.6%, Pearson 0.932 (10 steps); XPU vs its phase 2
 repeat 0.01% mean relative, max abs 3.8e-5; "problems: none". Phase 3 was not
 run; its guard was checked (exits 1 without `DLRMV3_ALLOW_MULTI_TILE=1`).
+(3) **Unquantized inference runs end to end on XPU.** `run_dlrm_v3_xpu.sh
+--mode infer`, random weights, Server scenario: exit 0, 256 queries
+processed, 0 `thread: failed` lines (see H-05), LoadGen's only error entry is
+the expected `Max query count reached`; result INVALID because the run is
+shorter than `min_duration` (expected). The dense HSTU model runs on `xpu:0`
+in bf16 with the default Triton kernels. Training forces the PYTORCH kernel on
+XPU (Triton backward crashes), but inference only needs the forward, so it
+uses Triton. Inference also keeps the stock `max_seq_len=16384`; training on
+XPU caps it at 256. The sparse lookup runs on CPU (H-04). A second run with
+`run.compute_eval = True` (LoadGen AccuracyOnly, 1510 MovieLens-1M eval
+samples): exit 0, all predictions finite (0 NaN / Inf, range 0.19–0.68), and
+`inference/accuracy.py` reports gAUC 0.50 and NE 1.11, as expected for random
+weights. Not tested: inference from a checkpoint trained by the harness, and
+quantized inference (it arrives with the quantized lookup work).
 
 **Two series.**
 - **A- entries** come from the first end-to-end DLRM-v3 trial on PVC. That
@@ -74,10 +96,10 @@ run; its guard was checked (exits 1 without `DLRMV3_ALLOW_MULTI_TILE=1`).
 | [H-01](#h-01-xpu-kernels-are-only-registered-by-an-explicit-import-fbgemm_xpu) | XPU kernels only registered by an explicit `import fbgemm_xpu` | Worked around (still needed) | torchlib-xpu |
 | [H-02](#h-02-fbgemm_xpu-extensions-have-no-rpath) | `fbgemm_xpu` extensions have no RPATH | Not reached (RPATH still missing) | torchlib-xpu |
 | [H-03](#h-03-the-fbgemm-wheel-is-patched-in-place) | The FBGEMM wheel is patched in place | Open (by design; 1.9.0 still lacks `XPU` upstream) | FBGEMM / TorchRec upstreaming |
-| [H-04](#h-04-unquantized-inference-does-its-embedding-lookup-on-cpu) | Unquantized inference does its embedding lookup on CPU | Not reached: inference is not ported on this branch | quantized embedding lookup work |
-| [H-05](#h-05-the-inference-runner-swallows-exceptions) | The inference runner swallows exceptions | Open (code unchanged; not run) | generative-recommenders upstream |
-| [H-06](#h-06-multithreaddataproducer-is-cuda-only) | `MultiThreadDataProducer` is CUDA-only | Open (code unchanged; not run) | generative-recommenders upstream |
-| [H-07](#h-07-offline-scenario-ignores-runnum_queries) | Offline scenario ignores `run.num_queries` | Not reached (inference not ported) | generative-recommenders upstream |
+| [H-04](#h-04-unquantized-inference-does-its-embedding-lookup-on-cpu) | Unquantized inference does its embedding lookup on CPU | Open (re-measured: inference runs; sparse on CPU) | quantized embedding lookup work |
+| [H-05](#h-05-the-inference-runner-swallows-exceptions) | The inference runner swallows exceptions | Open (not hit in the 2026-10-26 runs) | generative-recommenders upstream |
+| [H-06](#h-06-multithreaddataproducer-is-cuda-only) | `MultiThreadDataProducer` is CUDA-only | Worked around | generative-recommenders upstream |
+| [H-07](#h-07-offline-scenario-ignores-runnum_queries) | Offline scenario ignores `run.num_queries` | Worked around | generative-recommenders upstream |
 | [H-08](#h-08-inverted-metric-log-check-in-train_loop-and-eval_loop) | Inverted metric-log check in `train_loop` and `eval_loop` | Worked around (training loss, via `losses.csv`); bug itself open | generative-recommenders upstream |
 | [H-09](#h-09-tensorboard-log-directory-is-fixed-and-shared) | TensorBoard log directory is fixed and shared | Open (code read) | generative-recommenders fork |
 | [H-10](#h-10-seeded-xpu-training-is-not-bit-reproducible) | Seeded XPU training is not bit-reproducible | Open (low); re-measured over 10 steps | torchlib-xpu |
@@ -86,6 +108,7 @@ run; its guard was checked (exits 1 without `DLRMV3_ALLOW_MULTI_TILE=1`).
 | [H-13](#h-13-two-oneapi-versions-in-one-process) | Two oneAPI versions in one process | Informational; not re-checked | platform |
 | [H-14](#h-14-dlrm_v3-is-not-packaged-by-setuppy) | `dlrm_v3` is not packaged by `setup.py` | Open (re-checked) | generative-recommenders upstream |
 | [H-15](#h-15-torchautocast-is-hard-coded-to-cuda-in-the-model-modules) | `torch.autocast` is hard-coded to `"cuda"` in the model modules | **Open on this branch** (new, 2026-10-26) | generative-recommenders fork |
+| [H-16](#h-16-the-manifest-records-the-torchlib-xpu-checkout-not-the-revision-the-so-was-built-from) | The manifest records the torchlib-xpu checkout, not the revision the `.so` was built from | **Open** (new, 2026-10-26) | harness |
 
 ---
 
@@ -332,18 +355,19 @@ device`, although torchlib-xpu has that kernel.
 imports it automatically. Only the training path imported it. Import order
 does not matter on the pins: `fbgemm_xpu/__init__.py` imports `fbgemm_gpu`
 itself before loading its extension. (An abort when importing it first was
-seen on an earlier torchlib-xpu; it does not reproduce at `b59acf9` or with the build installed on 2026-10-26.
+seen on an earlier torchlib-xpu; it does not reproduce at `b59acf9` or `264f0c3`.
 Re-checked 2026-10-26: `import fbgemm_xpu` as the first import works, and
 `asynchronous_complete_cumsum` runs on XPU.)
 
-**Workaround.** On this branch an unconditional `import fbgemm_xpu` at the top
-of `train/train_ranker.py` (the harness branch of PR #1 has a guarded import in
-`train/utils.py` and `inference/main.py`). `inference/main.py` does not import
-it here, but inference is not ported on this branch (see H-04). Every new
-entry point, including probes, needs the same import. `write_run_manifest.py`
-locates `fbgemm_xpu` with `importlib.util.find_spec` instead of importing it.
+**Workaround.** An unconditional `import fbgemm_xpu` at the top of
+`train/train_ranker.py`, and a guarded one in `inference/main.py` (the harness
+branch of PR #1 has guarded imports in `train/utils.py` and
+`inference/main.py`). Every new entry point, including probes, needs the same
+import. `write_run_manifest.py` locates `fbgemm_xpu` with
+`importlib.util.find_spec` instead of importing it.
 
-**Reproduce.** `bash run_dlrm_v3_xpu.sh --mode infer` is not available on this branch. On any branch:
+**Reproduce.** Remove the import from `inference/main.py`;
+`bash run_dlrm_v3_xpu.sh --mode infer` (not re-run). Or, without the harness:
 `python -c "import torch, fbgemm_gpu; torch.ops.fbgemm.asynchronous_complete_cumsum(torch.tensor([1, 2], device='xpu'))"`
 fails without `import fbgemm_xpu`.
 
@@ -359,7 +383,7 @@ directly without torch (for example with `ctypes`) fails with
 **Status on current pins.** Not reached: `fbgemm_xpu/__init__.py` imports
 torch before loading `_C`, so `import fbgemm_xpu` works without the workaround
 (checked 2026-09-30 with torch's `lib/` removed from `LD_LIBRARY_PATH`). The
-RPATH is still missing. Re-checked 2026-10-26 on the installed build: `readelf -d` on the
+RPATH is still missing. Re-checked 2026-10-26 on the build from `264f0c3`: `readelf -d` on the
 installed `_C` and `_C_training` shows no RPATH/RUNPATH, and `import fbgemm_xpu`
 works in a clean environment (`env -i`, no `LD_LIBRARY_PATH`, no oneAPI
 `setvars.sh`).
@@ -394,17 +418,18 @@ patch; re-run `install_dlrmv3.sh` step 8.
 ### H-04 Unquantized inference does its embedding lookup on CPU
 
 **Symptom.** `--mode infer` runs end to end, but only the dense HSTU model runs
-on XPU (~37 ms per batch of 16); the sparse lookup runs on CPU (~2.4 ms).
+on XPU; the sparse lookup runs on CPU.
 
 **Root cause.** Upstream `HSTUSparseInferenceModule` builds a plain TorchRec
 `EmbeddingCollection` on `table_device="cpu"`. FBGEMM lookups only enter
 through the quantized path (`QuantEmbeddingCollection`).
 
-**Status.** Not reached on this branch: inference is not ported
-(`inference/model_family.py` still asserts `torch.cuda.is_available()` and uses
-`torch.cuda.*`), so `--mode infer` does not run on XPU here. The numbers above
-come from the harness branch of PR #1 (2026-09-29/30) and were not re-measured.
-Unquantized inference would not exercise the XPU embedding lookup there either.
+**Status.** Open. Re-measured 2026-10-26 on this branch: `--mode infer` runs
+end to end. The sparse module is built with `table_device="cpu"`
+(`inference/model_family.py`); its `EmbeddingCollection` holds plain
+`Embedding(1000000, 64)` tables (`run.log`); the dense module runs on `xpu:0`.
+Unquantized inference therefore does not exercise any XPU embedding lookup or
+any fbgemm-xpu TBE kernel.
 
 **Owner.** quantized embedding lookup work (separate from this harness).
 
@@ -419,8 +444,9 @@ which hides the original error. That error escapes LoadGen's C++ callback and
 the process dumps core (exit 139).
 
 **Status.** Open (code read 2026-10-26: `Runner.run_one_item` in
-`inference/main.py` still has the broad `except` / `finally`; not run on this
-branch). Check `run.log` for `thread: failed` as well as the exit code.
+`inference/main.py` still has the broad `except` / `finally`). Not hit in the
+two inference runs of 2026-10-26: 0 `thread: failed` lines in either `run.log`.
+Check `run.log` for `thread: failed` as well as the exit code.
 On a core dump, the real error is the `thread: failed` line just before the
 `UnboundLocalError`.
 
@@ -431,11 +457,12 @@ On a core dump, the real error is the `thread: failed` line just before the
 **Root cause.** `inference/data_producer.py` uses `torch.cuda.Stream` per
 worker thread.
 
-**Status.** Open (code read 2026-10-26: unchanged on this branch; inference is
-not ported here).
+**Status.** Worked around; the code is unchanged. Re-measured 2026-10-26: the
+inference gin sets `run.data_producer_threads = 1`, and both inference runs
+completed.
 
 **Workaround.** `run.data_producer_threads = 1` in
-`inference/gin/movielens_1m_xpu.gin` (harness branch of PR #1).
+`inference/gin/movielens_1m_xpu.gin`.
 
 **Owner.** generative-recommenders upstream.
 
@@ -444,11 +471,12 @@ not ported here).
 **Root cause.** `inference/main.py:get_num_queries` sizes Offline runs as
 1.1 × `min_duration` (600 s) × target QPS.
 
-**Status.** Not reached on this branch (no XPU inference path); the code in
-`inference/main.py:get_num_queries` is unchanged.
+**Status.** Worked around; the code in `inference/main.py:get_num_queries` is
+unchanged.
 
-**Workaround.** The harness branch of PR #1 uses the Server scenario, which honours
-`num_queries`. LoadGen reports such short runs INVALID, which is expected.
+**Workaround.** The inference gin uses the Server scenario, which honours
+`num_queries` (re-measured 2026-10-26: 256 queries processed). LoadGen
+reports such short runs INVALID, which is expected.
 
 **Owner.** generative-recommenders upstream (low).
 
@@ -588,7 +616,42 @@ output.
 
 **Owner.** generative-recommenders fork.
 
-New findings get the next H- ID (`H-16`); the A- series is closed. Add a row to the index and a
+### H-16 The manifest records the torchlib-xpu checkout, not the revision the `.so` was built from
+
+**Symptom.** On the 2026-10-26 host, every `manifest.json` gives torchlib-xpu
+as `2655c44`, clean, with `binaries_older_than_head_commit: false`. The
+fbgemm-xpu that actually ran was built from `264f0c3`.
+
+**Root cause.** fbgemm-xpu is an editable install whose compiled `_C*.so` are
+copied into site-packages at build time. `write_run_manifest.py` reports the
+SHA the source checkout is at when the run starts. It flags stale binaries
+only by comparing the `.so` mtime with the HEAD commit's committer date, not
+with the time the checkout moved. Here the checkout moved from
+`264f0c3` to `main` (`2655c44`) on 2026-10-23, three days after the build
+(reflog), and `2655c44` was committed on 2026-10-19, before the build, so
+nothing was flagged. The torchrec component is not affected: it is a
+non-editable wheel whose version carries the build SHA (`+c0fc555`), and the
+manifest reports `build_sha_matches_source_head: false` for the moved
+checkout.
+
+**Status.** Open. The `.so` sha256 in the manifest still identifies the build
+exactly, but not which tree it came from.
+
+**Workaround.** Do not move the torchlib-xpu checkout without rebuilding
+fbgemm-xpu (`install_dlrmv3.sh` step 4). To check a host:
+`git -C src/torchlib-xpu reflog --date=iso | head`.
+
+**Fix.** In `write_run_manifest.py`, compare the `.so` mtime with the time of
+the last HEAD move (the reflog entry), not with the commit time, or record the
+build SHA at build time.
+
+**Owner.** harness.
+
+---
+
+## Adding a finding
+
+New findings get the next H- ID (`H-17`); the A- series is closed. Add a row to the index and a
 section with: symptom, root cause (or "not investigated"), fix or workaround,
 status on the current pins, evidence (run folder with its `manifest.json` when
 the harness is available, a probe script, or a reproduction command), owner.
