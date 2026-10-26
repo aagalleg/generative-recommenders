@@ -46,12 +46,14 @@ sizes its thread pool from all the node's cores, and the run slows to a crawl.
   (`probes/dlrm-v3-xpu-fbgemmv1.9.0`), without changing the question. Each
   such probe carries, inline: the repo-relative `train/gin/debug.gin`;
   `torch.device` instead of `xpu_compat.detect_device`; and the model dims it
-  was written for. On this branch there is no `dlrm_v3/harness.py` and
-  `get_hstu_configs` is not gin-configurable, so the probe sets
+  was written for. `dlrm_v3/harness.py` is now on this branch, but
+  `get_hstu_configs` is still not gin-configurable, so the probe sets
   `configs.HSTU_EMBEDDING_DIM` / `configs.HASH_SIZE` from the environment
   (defaults 64 and 1,000,000) and wraps `train_utils.get_hstu_configs` to set
   the other dims on the returned config
-  ([A-02](FINDINGS.md#a-02-hstu_-overrides-silently-inert)). The
+  ([A-02](FINDINGS.md#a-02-hstu_-overrides-silently-inert)). The probes do
+  not call `harness.apply_size_overrides()`, so they stay standalone and do
+  not depend on the harness files. The
   `max_seq_len = 1024` cap of the harness-branch version is gone: this
   branch's `make_model` already caps it at 256 on an XPU host, so the HSTU
   attention is smaller than when the probes were written. (On the harness
@@ -64,7 +66,7 @@ sizes its thread pool from all the node's cores, and the run slows to a crawl.
   had.
 
 **Status** was measured on 2026-10-26 on the current pins (see FINDINGS.md:
-torch 2.14.1, fbgemm-gpu-cpu 1.9.0, fbgemm-xpu from torchlib-xpu `264f0c3`,
+torch 2.14.1, fbgemm-gpu-cpu 1.9.0, fbgemm-xpu built 2026-10-20 from the torchlib-xpu checkout (now `2655c44`),
 torchrec `c0fc555`), PVC one tile (`ZE_AFFINITY_MASK=0`), unless marked *not
 run*. The previous status (2026-09-29, fbgemm 1.8.0, torch 2.13) is quoted
 where it differs. The probes were not rerun on a B60. The `cpu` / `xpu` probes were run once
@@ -95,7 +97,7 @@ with each argument.
 | [`probe_ccl_2rank_config_matrix.sh`](probes/probe_ccl_2rank_config_matrix.sh) | Which oneCCL configuration lets 2-rank DLRM-v3 training survive? | A-03 | earlier branch | *Not run; not adapted on purpose.* **Runs the cross-tile training workload that disabled the card** (A-03). |
 | [`probe_profiler_activity_teardown.py`](probes/probe_profiler_activity_teardown.py) | Which `torch.profiler` activity combinations survive teardown on XPU? | [A-04](FINDINGS.md#a-04-profiler-aborts-the-process-on-teardown) | pins | Runs: all four cases (`cpu_only`, `cpu_cuda`, `cpu_xpu`, `xpu_only`) survive start/step/stop/teardown on torch 2.14.1. |
 | [`probe_profiler_sigabrt_fix.py`](probes/probe_profiler_sigabrt_fix.py) | Does the DLRM-v3 profiler wrapper abort on XPU, and does calling `stop()` fix it? | A-04 | pins | Runs: still **reproduces** the Kineto `clearActivities` SIGABRT (`rc=-6`) for `xpu_nostop`; `repro_cuda_nostop`, `cuda_with_stop` and `xpu_with_stop` exit cleanly. The branch's `Profiler.__del__` calls `stop()`, so the DLRM-v3 wrapper is no longer affected (A-04); the 10-step `debug` run with `output_trace = True` exits 0. |
-| [`probe_numerics_train_step_cpu_vs_xpu.py`](probes/probe_numerics_train_step_cpu_vs_xpu.py) | Do N training steps on XPU track CPU from bitwise-identical weights, in one process? | [H-10](FINDINGS.md#h-10-seeded-xpu-training-is-not-bit-reproducible) | pins (adapted; FP32 tables through a wrapper around `get_embedding_table_config`, otherwise A-01 masks the comparison) | Runs: 10 steps, worst relative loss difference 0.003% (2026-09-29: 0.002%), worst weight difference 1.2e-2 (Adam sign flips on near-zero gradients); verdict "tracks". The sharded, trend-level version is the harness's `run_dlrm_v3_xpu.sh --device cpu` + `compare_loss_curves.py` on the harness branch of PR #1; this branch has neither. |
+| [`probe_numerics_train_step_cpu_vs_xpu.py`](probes/probe_numerics_train_step_cpu_vs_xpu.py) | Do N training steps on XPU track CPU from bitwise-identical weights, in one process? | [H-10](FINDINGS.md#h-10-seeded-xpu-training-is-not-bit-reproducible) | pins (adapted; FP32 tables through a wrapper around `get_embedding_table_config`, otherwise A-01 masks the comparison) | Runs: 10 steps, worst relative loss difference 0.003% (2026-09-29: 0.002%), worst weight difference 1.2e-2 (Adam sign flips on near-zero gradients); verdict "tracks". The sharded, trend-level version is `run_dlrm_v3_xpu.sh --device cpu` + `compare_loss_curves.py` (10 steps on this branch: mean relative 10.6%, Pearson 0.932; see FINDINGS.md). |
 
 ## Tools
 

@@ -6,29 +6,45 @@ fix or workaround, status on the current pins, evidence, owner.
 
 **Status checked against** (2026-10-26, branch
 `probes/dlrm-v3-xpu-fbgemmv1.9.0`): torch `2.14.1+xpu`, fbgemm-gpu-cpu
-`1.9.0`, fbgemm-xpu `0.9.0` built from torchlib-xpu `264f0c3` (the pin in
-`install_dlrmv3.sh`), torchrec `c0fc555` (`1.10.0a0`, branch
-`feature/xpu-device-support-v1.9.0_minimal`), generative-recommenders
-`120f0f8` plus the probes, on one tile of a PVC (Max 1550), oneAPI 2026.1.
+`1.9.0`, fbgemm-xpu `0.9.0` (`.so` built 2026-10-20 from the torchlib-xpu
+checkout, now at `2655c44`; `install_dlrmv3.sh` pins `264f0c3`, which is 2
+commits older, and the wheel does not record the SHA it was built from),
+torchrec `1.10.0a0+c0fc555` (the checkout is at `56c531e`, a later commit),
+generative-recommenders `fad127f` plus the harness files, on one tile of a PVC
+(Max 1550), oneAPI 2026.1.
 This replaces the previous check (2026-09-29: torchlib-xpu `b59acf9`,
 fbgemm-gpu-cpu `1.8.0`, torch 2.13, torchrec `e213eb9`, generative-recommenders
 `ed103ac`; plus B60 harness runs of 2026-09-30, which H-10 still cites).
 
 **What this branch carries.** It is based on the v1.9.0 minimal XPU port, not
 on the harness branch of
-[PR #1](https://github.com/aagalleg/generative-recommenders/pull/1). It has no
-`dlrm_v3/harness.py`, run manifest, `operative_config.gin`, `losses.csv` or
-`compare_loss_curves.py`, and `get_hstu_configs` is not gin-configurable. The
-launcher is `/opt/dlrmv3/run_dlrm_v3_xpu.sh`. So "status" below is one of:
-*re-measured* (probe or end-to-end run on 2026-10-26), *code read* (the code
-that causes it is unchanged or changed; not run), or *not re-checked*
-(depends on the harness or on a host that was not used).
+[PR #1](https://github.com/aagalleg/generative-recommenders/pull/1). The run
+harness of PR #1 has been added to it, without the inference half:
+`run_dlrm_v3_xpu.sh` (phases 1–3, `--device cpu`; no `infer` mode; phase 3
+guarded), `write_run_manifest.py` (`manifest.json`),
+`compare_loss_curves.py`, and `dlrm_v3/harness.py` (`losses.csv`,
+`operative_config.gin`, `seed_everything`, `apply_size_overrides`).
+`train_ranker.py` gained `--device_type`, `--world_size`,
+`--gin_config_file` and a `torchrun` path. Not carried: inference, the
+`movielens_1m_xpu.gin` model-size bindings, and the gin-configurable
+`get_hstu_configs` (it is still not configurable here). `apply_size_overrides`
+differs from PR #1: it acts only when `HSTU_EMBEDDING_DIM` or `HASH_SIZE` is
+set (the launcher always sets them), so a direct `train_ranker.py` run keeps
+the stock 512 / 10M sizes. So "status" below is one of: *re-measured* (probe
+or run on 2026-10-26), *code read* (not run), or *not re-checked*.
 
-**End-to-end check on this branch.** `train_ranker.py --dataset debug --mode
-train` (`debug.gin`: 10 batches, `output_trace = True`), one tile: exit 0, ten
-`train - Step` lines with finite NE (1.06 at step 2, 1.38 at step 10), no NaN
-in the log, all three tables `TW` / `fused`
-(`Using fused exact_row_wise_adagrad`), no SIGABRT at exit.
+**End-to-end checks on this branch.** (1) `train_ranker.py --dataset debug
+--mode train` (`debug.gin`: 10 batches, `output_trace = True`), one tile: exit
+0, ten `train - Step` lines with finite NE (1.06 at step 2, 1.38 at step 10),
+no NaN in the log, all three tables `TW` / `fused` (`Using fused
+exact_row_wise_adagrad`), no SIGABRT at exit. (2) The launcher, phase 1 `--mode
+train --device xpu`, 10 steps of MovieLens-1M (`train_loop.num_batches = 10`,
+dims 64 / 1M rows): exit 0, `manifest.json`, `operative_config.gin`, `run.gin`
+and `losses.csv` written. The same with `--device cpu`, and a phase 2 repeat
+(`torchrun`, one XPU), also exit 0. `compare_loss_curves.py`: XPU vs CPU
+mean relative difference 10.6%, Pearson 0.932 (10 steps); XPU vs its phase 2
+repeat 0.01% mean relative, max abs 3.8e-5; "problems: none". Phase 3 was not
+run; its guard was checked (exits 1 without `DLRMV3_ALLOW_MULTI_TILE=1`).
 
 **Two series.**
 - **A- entries** come from the first end-to-end DLRM-v3 trial on PVC. That
@@ -47,8 +63,8 @@ in the log, all three tables `TW` / `fused`
 | ID | Finding | Status on current pins | Owner |
 | --- | --- | --- | --- |
 | [A-01](#a-01-fp16-embedding-tables-train-to-nan--optimizer-epsilon-not-the-device) | FP16 tables train to NaN — optimizer epsilon, not the device | Not reached; root cause unfixed (dtype guard still missing) | generative-recommenders fork |
-| [A-02](#a-02-hstu_-overrides-silently-inert) | `HSTU_*` overrides silently inert | **Open on this branch**: no override mechanism; probes override in-process | generative-recommenders fork |
-| [A-03](#a-03-two-rank-cross-tile-xccl-took-the-card-off-the-pcie-bus) | Two-rank cross-tile XCCL took the card off the PCIe bus | **Open — hazard present** for any multi-tile run; not re-run | harness; platform/driver |
+| [A-02](#a-02-hstu_-overrides-silently-inert) | `HSTU_*` overrides silently inert | Fixed for the two supported variables; the other dims are not configurable here | harness |
+| [A-03](#a-03-two-rank-cross-tile-xccl-took-the-card-off-the-pcie-bus) | Two-rank cross-tile XCCL took the card off the PCIe bus | **Open — hazard present**; launcher phase 3 guarded, other multi-tile paths not; not re-run | harness; platform/driver |
 | [A-04](#a-04-profiler-aborts-the-process-on-teardown) | Profiler aborts the process on teardown | **Fixed on this branch** (`Profiler.__del__` calls `stop()`); torch behaviour unchanged | generative-recommenders fork |
 | [A-05](#a-05-cpu-on-the-xpu-sharding-plan-fails-in-construct_jagged_tensors) | CPU on the XPU sharding plan fails in `construct_jagged_tensors` | Not reached | torchrec |
 | [A-06](#a-06-xpu-was-dense-kernel-only-data_parallel-sharding) | XPU was DENSE-kernel only (DATA_PARALLEL sharding) | Superseded for training; DENSE TBE module still fails on XPU (FBGEMM 1.9.0 Python) | FBGEMM / TorchRec (DENSE path, low) |
@@ -62,10 +78,10 @@ in the log, all three tables `TW` / `fused`
 | [H-05](#h-05-the-inference-runner-swallows-exceptions) | The inference runner swallows exceptions | Open (code unchanged; not run) | generative-recommenders upstream |
 | [H-06](#h-06-multithreaddataproducer-is-cuda-only) | `MultiThreadDataProducer` is CUDA-only | Open (code unchanged; not run) | generative-recommenders upstream |
 | [H-07](#h-07-offline-scenario-ignores-runnum_queries) | Offline scenario ignores `run.num_queries` | Not reached (inference not ported) | generative-recommenders upstream |
-| [H-08](#h-08-inverted-metric-log-check-in-train_loop-and-eval_loop) | Inverted metric-log check in `train_loop` and `eval_loop` | **Open** (code read) | generative-recommenders upstream |
+| [H-08](#h-08-inverted-metric-log-check-in-train_loop-and-eval_loop) | Inverted metric-log check in `train_loop` and `eval_loop` | Worked around (training loss, via `losses.csv`); bug itself open | generative-recommenders upstream |
 | [H-09](#h-09-tensorboard-log-directory-is-fixed-and-shared) | TensorBoard log directory is fixed and shared | Open (code read) | generative-recommenders fork |
-| [H-10](#h-10-seeded-xpu-training-is-not-bit-reproducible) | Seeded XPU training is not bit-reproducible | Open (low); CPU-vs-XPU tracking re-measured | torchlib-xpu |
-| [H-11](#h-11-launcher-sourced-a-version-pinned-oneapi-path-silently) | Launcher sourced a version-pinned oneAPI path silently | Harness launcher; not re-checked | harness |
+| [H-10](#h-10-seeded-xpu-training-is-not-bit-reproducible) | Seeded XPU training is not bit-reproducible | Open (low); re-measured over 10 steps | torchlib-xpu |
+| [H-11](#h-11-launcher-sourced-a-version-pinned-oneapi-path-silently) | Launcher sourced a version-pinned oneAPI path silently | Fixed in the launcher (sourcing path not exercised) | harness |
 | [H-12](#h-12-mlperf-loadgen-build-writes-into-its-source-tree) | MLPerf LoadGen build writes into its source tree | Not re-checked | harness |
 | [H-13](#h-13-two-oneapi-versions-in-one-process) | Two oneAPI versions in one process | Informational; not re-checked | platform |
 | [H-14](#h-14-dlrm_v3-is-not-packaged-by-setuppy) | `dlrm_v3` is not packaged by `setup.py` | Open (re-checked) | generative-recommenders upstream |
@@ -133,28 +149,35 @@ failure from the stock `max_seq_len=16384`.
 `configs.get_hstu_configs`, but `train/utils.py` had imported the function
 earlier and kept its own reference, so every override was ignored.
 
-**Status on current pins.** *Open on this branch (code read, and exercised by
-the probes).* This branch has no `harness.py`, so nothing reads
-`HSTU_EMBEDDING_DIM` or `HASH_SIZE` (or any other `HSTU_*` / `DLRM_V3_*`
-variable): they are plain module constants in `dlrm_v3/configs.py`
-(512 and 10,000,000), and `get_hstu_configs` is not `@gin.configurable`. The
-only size control is `make_model` capping `max_seq_len` at 256 when an XPU is
-present (the PYTORCH attention kernel is O(N²) in memory). The model-building
-probes therefore set the constants and the config fields in-process (see
-[PROBES.md](PROBES.md)). On the harness branch of PR #1 the two size
-variables are read by `harness.apply_size_overrides` and the other dims are
-gin bindings; the remaining trial-branch variables (`HSTU_MAX_SEQ_LEN`,
-`HSTU_TABLE_DTYPE`, `HSTU_NUM_HEADS`, `DLRM_V3_SEED`, …) do not exist in either.
+**Status on current pins.** *Fixed for the two supported variables; the
+rest is ignored (re-measured 2026-10-26).* `dlrm_v3/harness.py:apply_size_overrides`
+reads `HSTU_EMBEDDING_DIM` and `HASH_SIZE` (when either is set; the launcher
+always sets both, 64 and 1,000,000), and their effective values are written to
+`operative_config.gin` (verified in the launcher run). Without them the stock
+512 / 10,000,000 are kept: they are module constants in `dlrm_v3/configs.py`.
+`get_hstu_configs` is still not `@gin.configurable` on this branch, so the
+other HSTU dims (heads, layers, attention and transducer widths) cannot be
+set from gin or the environment; the launcher run builds the stock 5-layer,
+512-wide transducer with a 64-wide table (`DlrmHSTUConfig` in `run.log`). The
+only other size control is `make_model` capping `max_seq_len` at 256 when an
+XPU is present (the PYTORCH attention kernel is O(N²) in memory). The
+model-building probes set the config fields in-process for that reason (see
+[PROBES.md](PROBES.md)). The remaining trial-branch variables
+(`HSTU_MAX_SEQ_LEN`, `HSTU_TABLE_DTYPE`, `HSTU_NUM_HEADS`, `DLRM_V3_SEED`, …)
+do not exist: setting them has no effect. They are not rejected;
+`manifest.json` records every `HSTU_*` / `CCL_*` / `FI_*` / `ZE_*` variable
+under `env`, so a mismatch is visible by comparing it with
+`operative_config.gin`.
 
 **Evidence.** Reproduced on 2026-09-28 on the harness branch before its fix: a
 CPU run with `HSTU_EMBEDDING_DIM=64 HASH_SIZE=1000000` built 512-dim / 10M-row
-tables and failed in the planner. On this branch the 10-step `debug` run builds
-the 512-dim / 10M-row tables (`SplitTableBatchedEmbeddingBagsCodegen` with
-`(10000000, 512, ...)` in the run log).
+tables and failed in the planner. On this branch the 10-step `debug` run
+without the variables builds the 512-dim / 10M-row tables
+(`SplitTableBatchedEmbeddingBagsCodegen` with `(10000000, 512, ...)` in the
+run log); the launcher run builds `hstu_embedding_table_dim=64`.
 
-**Owner.** generative-recommenders fork (carry the harness's size overrides, or
-make `get_hstu_configs` gin-configurable; consider rejecting unknown `HSTU_*`
-variables).
+**Owner.** harness (make `get_hstu_configs` gin-configurable as in PR #1;
+consider rejecting unknown `HSTU_*` variables).
 
 ### A-03 Two-rank cross-tile XCCL took the card off the PCIe bus
 
@@ -172,16 +195,20 @@ without pidfd support. Small collectives passed; real training traffic did not.
 trial branch.)
 
 **Status on current pins.** **Open — not re-tested; treat the hazard as
-present.** This branch has no launcher phase 3, but
-`/opt/dlrmv3/run_dlrm_v3_xpu.sh --world-size N` (N > 1) exposes tiles `0..N-1`
-and runs XCCL across them with `CCL_ZE_IPC_EXCHANGE=pidfd`, which is the same
-cross-tile Level Zero IPC traffic. The host used on 2026-10-26 differs from the
+present, now guarded in the launcher only.** `run_dlrm_v3_xpu.sh --phase 3`
+runs XCCL across all detected devices (`NUM_XPUS`) with
+`CCL_ZE_IPC_EXCHANGE=pidfd`, the same cross-tile Level Zero IPC traffic. In
+this repo's copy of the launcher, phase 3 now refuses to start unless
+`DLRMV3_ALLOW_MULTI_TILE=1` is set (checked 2026-10-26: it exits 1 with an
+explanation); PR #1's launcher has no such guard. Direct `torchrun` calls,
+`/opt/dlrmv3/run_dlrm_v3_xpu.sh --world-size N`, and `train_ranker.py
+--world_size N` are not guarded. The host used on 2026-10-26 differs from the
 trial's: Linux 6.8 (so `pidfd_open` works here, checked), not 5.15, and 16
 tiles visible. Whether the fabric failure is specific to the trial's
 2023 kernel driver and kernel 5.15 is not known, and nobody has run sustained cross-tile
 XCCL on this host. The trial's escape, `FBGEMM_XPU_FORCE_GLOO=1` (collectives
 staged through the host), does not exist in the pinned trees. Do not run a
-multi-tile job on a PVC without a recoverable card until it is guarded. The
+multi-tile job on a PVC without a recoverable card. The
 `ccl` probes were **not run** on 2026-10-26 for that reason.
 
 **Evidence.** The kernel log lines above. Probes (do not run them across tiles):
@@ -305,7 +332,7 @@ device`, although torchlib-xpu has that kernel.
 imports it automatically. Only the training path imported it. Import order
 does not matter on the pins: `fbgemm_xpu/__init__.py` imports `fbgemm_gpu`
 itself before loading its extension. (An abort when importing it first was
-seen on an earlier torchlib-xpu; it does not reproduce at `b59acf9` or `264f0c3`.
+seen on an earlier torchlib-xpu; it does not reproduce at `b59acf9` or with the build installed on 2026-10-26.
 Re-checked 2026-10-26: `import fbgemm_xpu` as the first import works, and
 `asynchronous_complete_cumsum` runs on XPU.)
 
@@ -313,10 +340,10 @@ Re-checked 2026-10-26: `import fbgemm_xpu` as the first import works, and
 of `train/train_ranker.py` (the harness branch of PR #1 has a guarded import in
 `train/utils.py` and `inference/main.py`). `inference/main.py` does not import
 it here, but inference is not ported on this branch (see H-04). Every new
-entry point, including probes, needs the same import.
+entry point, including probes, needs the same import. `write_run_manifest.py`
+locates `fbgemm_xpu` with `importlib.util.find_spec` instead of importing it.
 
-**Reproduce.** On the harness branch of PR #1: remove the import from
-`inference/main.py`; `bash run_dlrm_v3_xpu.sh --mode infer`. On any branch:
+**Reproduce.** `bash run_dlrm_v3_xpu.sh --mode infer` is not available on this branch. On any branch:
 `python -c "import torch, fbgemm_gpu; torch.ops.fbgemm.asynchronous_complete_cumsum(torch.tensor([1, 2], device='xpu'))"`
 fails without `import fbgemm_xpu`.
 
@@ -332,22 +359,22 @@ directly without torch (for example with `ctypes`) fails with
 **Status on current pins.** Not reached: `fbgemm_xpu/__init__.py` imports
 torch before loading `_C`, so `import fbgemm_xpu` works without the workaround
 (checked 2026-09-30 with torch's `lib/` removed from `LD_LIBRARY_PATH`). The
-RPATH is still missing. Re-checked 2026-10-26 on `264f0c3`: `readelf -d` on the
+RPATH is still missing. Re-checked 2026-10-26 on the installed build: `readelf -d` on the
 installed `_C` and `_C_training` shows no RPATH/RUNPATH, and `import fbgemm_xpu`
 works in a clean environment (`env -i`, no `LD_LIBRARY_PATH`, no oneAPI
 `setvars.sh`).
 
 **Workaround.** The launcher prepends torch's `lib/` to `LD_LIBRARY_PATH`;
-not needed for `import fbgemm_xpu` on the pins, kept as a safeguard.
+not needed for `import fbgemm_xpu` on the pins, kept as a safeguard (this
+repo's `run_dlrm_v3_xpu.sh` carries it).
 
 **Owner.** torchlib-xpu (bake in an RPATH; low priority).
 
 ### H-03 The FBGEMM wheel is patched in place
 
 **Symptom.** Every `manifest.json` reports `fbgemm` as dirty, with
-`fbgemm_gpu/tbe/config/embedding_config.py` in `modified_files` (harness
-branch). Without the manifest: the installed wheel no longer matches its
-`RECORD`.
+`fbgemm_gpu/tbe/config/embedding_config.py` in `modified_files` (checked
+2026-10-26 in the manifest of a launcher run on this branch).
 
 **Root cause.** TorchRec references `ComputeDevice.XPU`, which
 fbgemm-gpu-cpu 1.8.0 and 1.9.0 do not define. `install_dlrmv3.sh` step 8 runs
@@ -435,8 +462,9 @@ with 50, 49 of 50 batches are. Upstream since `418e588`.
 **Status.** Open (code read 2026-10-26): `train_loop` and `eval_loop` in
 `train/utils.py` still use `!=`, the other two loops `==`.
 
-**Workaround.** The harness branch of PR #1 records every training step's loss in
-`RUN_DIR/losses.csv` independently. This branch has no such record. Eval metrics in `--mode eval` are still
+**Workaround.** `losses.csv` in the run folder records every training step's
+loss independently of the metric log (`train_loop` and `train_eval_loop`; not
+the streaming loop). Eval metrics in `--mode eval` are still
 affected.
 
 **Owner.** generative-recommenders upstream.
@@ -468,10 +496,14 @@ backward kernels or an unseeded stochastic-rounding source (FP16 tables use
 divergence measured by `probe_numerics_train_step_cpu_vs_xpu.py` (worst
 relative loss difference 0.002% over 10 steps; re-measured 2026-10-26 on
 torch 2.14.1 / fbgemm 1.9.0: 0.003%, worst weight difference 1.2e-2, verdict
-"tracks"). Run-to-run XPU reproducibility was **not** re-measured.
+"tracks"). Run-to-run XPU reproducibility was re-measured over 10 steps only
+(see Reproduce); the full-epoch B60 numbers above were not repeated.
 
 **Reproduce.** Two runs of `bash run_dlrm_v3_xpu.sh --phase 1 --mode train`;
-`python compare_loss_curves.py RUN_A CPU_RUN --repeat RUN_B`.
+`python compare_loss_curves.py RUN_A CPU_RUN --repeat RUN_B`. Re-measured
+2026-10-26 on this branch (PVC, 10 steps; the repeat was a phase 2 run):
+XPU vs XPU repeat, max abs 3.8e-5, mean relative 0.01%; XPU vs CPU, mean
+relative 10.6%, Pearson 0.932.
 
 **Owner.** torchlib-xpu / FBGEMM XPU kernels (low).
 
@@ -483,9 +515,12 @@ torch 2.14.1 / fbgemm 1.9.0: 0.003%, worst weight difference 1.2e-2, verdict
 **Status.** Fixed in the launcher (`ee644e8`): `ONEAPI_ROOT` (default
 `/opt/intel/oneapi`), version-independent `setvars.sh`, hard error if it is
 missing or fails. An already activated shell (`SETVARS_COMPLETED=1`) is used as
-is; the manifest's `runtime.oneapi` records the versions either way. This is
-the harness branch's launcher; this branch is launched by
-`/opt/dlrmv3/run_dlrm_v3_xpu.sh`, which was not re-checked for this.
+is; the manifest's `runtime.oneapi` records the versions either way. Code read
+2026-10-26 for this repo's `run_dlrm_v3_xpu.sh`: it sources
+`${ONEAPI_ROOT}/setvars.sh` when `SETVARS_COMPLETED` is not 1. The sourcing
+path was **not exercised**: the shell used for the runs already had oneAPI
+active (`SETVARS_COMPLETED=1`). `/opt/dlrmv3/run_dlrm_v3_xpu.sh` (the older
+launcher outside this repo) was not checked for this.
 
 **Owner.** harness.
 
@@ -504,7 +539,7 @@ Not re-checked on 2026-10-26.
 
 **Observation.** The system compiler (2026.1.1) builds fbgemm-xpu; torch loads
 the pip runtime wheels (`intel-sycl-rt` 2026.0.0). Both are recorded in
-`manifest.json` under `runtime.oneapi` (harness branch). No failure attributed
+`manifest.json` under `runtime.oneapi`. No failure attributed
 to it so far. Not re-checked with torch 2.14.1 (its runtime wheel versions were
 not compared).
 
@@ -521,7 +556,7 @@ under `generative_recommenders/` still have no `__init__.py`, and `setup.py`
 still uses `find_packages(exclude=["configs"])`).
 
 **Workaround.** The launcher puts the checkout on `PYTHONPATH`
-(`run_dlrm_v3_xpu.sh`; the probes need `PYTHONPATH=$PWD` too).
+(this repo's `run_dlrm_v3_xpu.sh` does; the probes need `PYTHONPATH=$PWD` too).
 
 **Owner.** generative-recommenders upstream.
 

@@ -20,12 +20,17 @@ logging.basicConfig(level=logging.INFO)
 import os
 import sys
 import traceback
-
+from typing import Optional
 import gin
 import torch
 import fbgemm_xpu  # noqa: F401  registers XPU kernels for fbgemm ops
 
 from generative_recommenders.dlrm_v3.checkpoint import load_dmp_checkpoint
+from generative_recommenders.dlrm_v3.harness import (
+    apply_size_overrides,
+    seed_everything,
+    write_operative_config,
+)
 from generative_recommenders.dlrm_v3.train.utils import (
     cleanup,
     eval_loop,
@@ -66,15 +71,19 @@ def _main_func(
     mode: str,
     hstu_ultra: bool,
     hstu_ultra_fp8: bool,
+    device_type: Optional[str] = None,
 ) -> None:
 
-    if torch.cuda.is_available():
-        device = torch.device(f"cuda:{rank}")
-    elif torch.xpu.is_available():
+    if device_type == "cpu":
+        device = torch.device("cpu")
+    elif device_type == "xpu" or (device_type is None and not torch.cuda.is_available()):
+        assert torch.xpu.is_available(), "XPU requested but torch.xpu is not available"
         device = torch.device(f"xpu:{rank}")
+    elif torch.cuda.is_available():
+        device = torch.device(f"cuda:{rank}")
     else:
         raise ValueError("Unsupported device type")
-    
+
     logger.info(f"rank: {rank}, world_size: {world_size}, device: {device}")
     setup(
         rank=rank,
@@ -84,6 +93,11 @@ def _main_func(
     )
     # parse all arguments
     gin.parse_config_file(gin_file)
+    seed_everything()
+
+    # HSTU_EMBEDDING_DIM / HASH_SIZE come from the environment (see harness.py).
+    apply_size_overrides(device.type)
+    write_operative_config(rank, operative=False)
 
     model, model_configs, embedding_table_configs = make_model(
         hstu_ultra_stack_name=("hstu_ultra" if hstu_ultra else None),
@@ -166,6 +180,8 @@ def _main_func(
         logger.info(traceback.format_exc())
         cleanup()
         raise Exception(e)
+    finally:
+        write_operative_config(rank)
 
 
 def get_args():  # pyre-ignore [3]
@@ -190,6 +206,23 @@ def get_args():  # pyre-ignore [3]
         choices=["train", "eval", "train-eval", "streaming-train-eval"],
         help="mode",
     )
+    parser.add_argument(
+        "--device_type",
+        default=None,
+        choices=["cuda", "xpu", "cpu"],
+        help="device type (default: cuda if available, else xpu)",
+    )
+    parser.add_argument(
+        "--world_size",
+        type=int,
+        default=0,
+        help="override world size (0 = $WORLD_SIZE, else 1)",
+    )
+    parser.add_argument(
+        "--gin_config_file",
+        default=None,
+        help="path to a gin config file (overrides the --dataset gin file)",
+    )
     args, unknown_args = parser.parse_known_args()
     logger.warning(f"unknown_args: {unknown_args}")
     return args
@@ -205,9 +238,27 @@ def main() -> None:
         "train-eval",
         "streaming-train-eval",
     ], f"Unsupported mode: {args.mode}"
-    WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
-    MASTER_PORT = str(get_free_port())
-    gin_path = f"{os.path.dirname(__file__)}/gin/{SUPPORTED_CONFIGS[args.dataset]}"
+    WORLD_SIZE = args.world_size or int(os.environ.get("WORLD_SIZE", 1))
+    MASTER_PORT = os.environ.get("MASTER_PORT", str(get_free_port()))
+    gin_path = args.gin_config_file or (
+        f"{os.path.dirname(__file__)}/gin/{SUPPORTED_CONFIGS[args.dataset]}"
+    )
+    hstu_ultra = args.hstu_ultra or args.hstu_ultra_fp8
+
+    # torchrun has already spawned one process per rank.
+    local_rank = os.environ.get("LOCAL_RANK")
+    if local_rank is not None:
+        _main_func(
+            int(local_rank),
+            WORLD_SIZE,
+            int(MASTER_PORT),
+            gin_path,
+            args.mode,
+            hstu_ultra,
+            args.hstu_ultra_fp8,
+            args.device_type,
+        )
+        return
 
     mp.start_processes(
         _main_func,
@@ -216,8 +267,9 @@ def main() -> None:
             MASTER_PORT,
             gin_path,
             args.mode,
-            args.hstu_ultra or args.hstu_ultra_fp8,
+            hstu_ultra,
             args.hstu_ultra_fp8,
+            args.device_type,
         ),
         nprocs=WORLD_SIZE,
         join=True,
