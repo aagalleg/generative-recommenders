@@ -305,6 +305,10 @@ enabled`. The cause is in the installed FBGEMM 1.9.0 Python:
 `_tbe_dense_compat.py` fix never reached torchlib-xpu, and it would not help
 here: the failing line is in `fbgemm_gpu`, not in fbgemm-xpu.
 
+The fused path, which training uses, is covered by
+[`probe_kernel_tbe_fused_nobag.py`](probes/probe_kernel_tbe_fused_nobag.py)
+(passes) and `probe_nan_tbe_fused_init_alias.py` (passes).
+
 **Owner.** FBGEMM / TorchRec (the constructor); low priority while training
 uses the fused path.
 
