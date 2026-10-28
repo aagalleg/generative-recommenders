@@ -13,6 +13,7 @@
 # limitations under the License.
 
 # pyre-strict
+import dataclasses
 import logging
 import os
 from collections.abc import Iterator
@@ -199,6 +200,7 @@ def make_model(
     dataset: str,
     hstu_ultra_stack_name: Optional[str] = None,
     hstu_fp8_addmm_fwd: bool = False,
+    num_embeddings: Optional[int] = None,
 ) -> Tuple[torch.nn.Module, DlrmHSTUConfig, Dict[str, EmbeddingConfig]]:
     hstu_config = get_hstu_configs(
         dataset,
@@ -206,6 +208,13 @@ def make_model(
         hstu_fp8_addmm_fwd=hstu_fp8_addmm_fwd,
     )
     table_config = get_embedding_table_config(dataset)
+    # Optional row count for every table, for datasets whose ids are far below
+    # the default hash size. It must exceed the largest id of every feature.
+    if num_embeddings is not None:
+        table_config = {
+            name: dataclasses.replace(config, num_embeddings=num_embeddings)
+            for name, config in table_config.items()
+        }
     # The PYTORCH attention kernel forced below materialises a dense
     # [B, H, N, N] score tensor; the 16384 default needs ~60 GiB, so keep N small.
     if torch.xpu.is_available():
@@ -366,12 +375,18 @@ def make_optimizer_and_shard(
                         sparse_opt_cls, [param], sparse_opt_args
                     )
     sharders = get_default_sharders()
+    # XPU has no UVM kernel to fall back to, so plan against the real capacity.
+    hbm_cap = (
+        torch.xpu.get_device_properties(device).total_memory
+        if device.type == "xpu"
+        else 160 * 1024 * 1024 * 1024
+    )
     planner = EmbeddingShardingPlanner(
         topology=Topology(
             local_world_size=world_size,
             world_size=world_size,
             compute_device=device.type,
-            hbm_cap=160 * 1024 * 1024 * 1024,
+            hbm_cap=hbm_cap,
             ddr_cap=32 * 1024 * 1024 * 1024,
         )
     )

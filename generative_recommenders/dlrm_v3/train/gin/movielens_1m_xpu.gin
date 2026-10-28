@@ -3,6 +3,9 @@ dataset = "movielens-1m"
 
 # model parameters
 make_model.dataset = %dataset
+# MovieLens-1M ids are at most 6040 (user_id); the default 10M rows per table
+# need 57 GB of HBM and do not fit the planner's budget for a 64 GiB tile.
+make_model.num_embeddings = 8192
 
 # dense model optimizer
 dense_optimizer_factory_and_class.learning_rate = 0.001
