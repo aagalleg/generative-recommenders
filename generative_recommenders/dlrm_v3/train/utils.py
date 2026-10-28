@@ -375,7 +375,8 @@ def make_optimizer_and_shard(
                         sparse_opt_cls, [param], sparse_opt_args
                     )
     sharders = get_default_sharders()
-    # XPU has no UVM kernel to fall back to, so plan against the real capacity.
+    # XPU cannot keep tables in host memory yet (no UVM allocation in fbgemm-xpu,
+    # and TorchRec offers fused_uvm* only on CUDA), so plan against the real capacity.
     hbm_cap = (
         torch.xpu.get_device_properties(device).total_memory
         if device.type == "xpu"
