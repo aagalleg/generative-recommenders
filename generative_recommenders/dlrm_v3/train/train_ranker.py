@@ -23,7 +23,13 @@ import traceback
 
 import gin
 import torch
-import fbgemm_xpu  # noqa: F401  registers XPU kernels for fbgemm ops
+
+try:
+    import fbgemm_xpu  # noqa: F401  registers XPU kernels for fbgemm ops
+
+    _FBGEMM_XPU_AVAILABLE = True
+except ImportError:
+    _FBGEMM_XPU_AVAILABLE = False
 
 from generative_recommenders.dlrm_v3.checkpoint import load_dmp_checkpoint
 from generative_recommenders.dlrm_v3.train.utils import (
@@ -71,6 +77,8 @@ def _main_func(
     if torch.cuda.is_available():
         device = torch.device(f"cuda:{rank}")
     elif torch.xpu.is_available():
+        if not _FBGEMM_XPU_AVAILABLE:
+            raise ImportError("fbgemm_xpu is required to run on XPU devices")
         device = torch.device(f"xpu:{rank}")
     else:
         raise ValueError("Unsupported device type")
@@ -96,9 +104,7 @@ def _main_func(
         hstu_config=model_configs,
         embedding_table_configs=embedding_table_configs,
     )
-    # XPU: torchrec metric syncs over XCCL segfault in oneCCL at many ranks
-    # (same freed-event bug as DDP in train/utils.py); keep metrics on CPU and
-    # sync them over gloo instead.
+    
     metrics_device, metrics_pg = device, None
     if device.type == "xpu":
         metrics_device, metrics_pg = torch.device("cpu"), dist.new_group(backend="gloo")
