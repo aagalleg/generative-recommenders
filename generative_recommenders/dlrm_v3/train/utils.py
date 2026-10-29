@@ -226,7 +226,7 @@ def make_model(
         is_inference=False,
     )
 
-    # Force PYTORCH kernel on XPU — Triton HSTU attention backward crashes on XPU
+    # Use the PYTORCH HSTU attention kernel on XPU.
     if torch.xpu.is_available():
         model.set_hammer_kernel(HammerKernel.PYTORCH)
 
