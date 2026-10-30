@@ -226,10 +226,6 @@ def make_model(
         is_inference=False,
     )
 
-    # Use the PYTORCH HSTU attention kernel on XPU.
-    if torch.xpu.is_available():
-        model.set_hammer_kernel(HammerKernel.PYTORCH)
-
     return (
         model,
         hstu_config,

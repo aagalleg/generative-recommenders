@@ -36,7 +36,7 @@ from generative_recommenders.ops.triton.triton_fp8 import (
     triton_hstu_output_fp8_quantize_fwd,
     triton_quantize_fp8_per_row,
 )
-from generative_recommenders.ops.utils import maybe_register_custom_op
+from generative_recommenders.ops.utils import get_num_sms, maybe_register_custom_op
 
 
 def _get_layer_norm_mul_dropout_fwd_multirow_configs() -> List[triton.Config]:
@@ -1409,7 +1409,7 @@ def _triton_layer_norm_mul_dropout_bwd_impl(
         )
     dx = torch.empty_like(x)
     du = torch.empty_like(u)
-    sms = torch.cuda.get_device_properties(x.device).multi_processor_count
+    sms = get_num_sms(x.device)
     tile_num = max(1, min(sms * 64, N // 4))
     _dweight = torch.empty((tile_num, D), dtype=torch.float32, device=x.device)
     _dbias = torch.empty((tile_num, D), dtype=torch.float32, device=x.device)
@@ -3013,7 +3013,7 @@ def helion_layer_norm_mul_dropout_bwd(
         )
     dx = torch.empty_like(x)
     du = torch.empty_like(u)
-    sms = torch.cuda.get_device_properties(x.device).multi_processor_count
+    sms = get_num_sms(x.device)
     tile_num = max(1, min(sms * 64, N // 4))
     _dweight = torch.empty((tile_num, D), dtype=torch.float32, device=x.device)
     _dbias = torch.empty((tile_num, D), dtype=torch.float32, device=x.device)
