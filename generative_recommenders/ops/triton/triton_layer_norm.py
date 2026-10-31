@@ -31,6 +31,7 @@ from generative_recommenders.common import (
     triton_autotune,
 )
 from generative_recommenders.ops.utils import (
+    get_num_sms,
     is_sm100_plus,
     is_sm90,
     maybe_register_custom_op,
@@ -621,7 +622,7 @@ def _triton_weighted_layer_norm_bwd_impl(
     if learnable:
         N, D = x.shape
         dx = torch.empty_like(x)
-        sms = torch.cuda.get_device_properties(x.device).multi_processor_count
+        sms = get_num_sms(x.device)
         tile_num = max(1, min(sms * 8, N // 4))
         _dweight = torch.empty((tile_num, D), dtype=torch.float32, device=x.device)
         _dbias = torch.empty((tile_num, D), dtype=torch.float32, device=x.device)
@@ -1226,7 +1227,7 @@ def triton_weighted_rms_norm_bwd(
         dweight.zero_()
         return dx, dweight
 
-    sms = torch.cuda.get_device_properties(x.device).multi_processor_count
+    sms = get_num_sms(x.device)
     tile_num = max(1, min(sms * 8, N // 4, 1024))
     _dweight = torch.empty((tile_num, D), dtype=torch.float32, device=x.device)
 
@@ -1399,7 +1400,7 @@ def triton_swish_layer_norm_bwd(
     """Returns ``(dx, dweight, dbias)``."""
     N, D = x.shape
     dx = torch.empty_like(x)
-    sms = torch.cuda.get_device_properties(x.device).multi_processor_count
+    sms = get_num_sms(x.device)
     tile_num = max(1, min(sms * 8, N // 4))
     _dweight = torch.empty((tile_num, D), dtype=torch.float32, device=x.device)
     _dbias = torch.empty((tile_num, D), dtype=torch.float32, device=x.device)
@@ -1530,7 +1531,7 @@ class SwishLayerNormFunction(torch.autograd.Function):
         x, weight, bias, mean, rstd = ctx.saved_tensors
         N, D = x.shape
         dx = torch.empty_like(x)
-        sms = torch.cuda.get_device_properties(x.device).multi_processor_count
+        sms = get_num_sms(x.device)
         tile_num = max(1, min(sms * 8, N // 4))
         _dweight = torch.empty((tile_num, D), dtype=torch.float32, device=x.device)
         _dbias = torch.empty((tile_num, D), dtype=torch.float32, device=x.device)
