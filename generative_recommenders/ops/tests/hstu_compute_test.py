@@ -22,8 +22,10 @@ from typing import Optional
 
 import torch
 from generative_recommenders.common import (
+    accelerator_supports_bf16,
+    accelerator_unavailable,
     generate_sparse_seq_len,
-    gpu_unavailable,
+    get_accelerator_device,
     HammerKernel,
     set_dev_mode,
 )
@@ -31,7 +33,7 @@ from hypothesis import given, settings, strategies as st, Verbosity
 
 
 class HSTUComputeTest(unittest.TestCase):
-    @unittest.skipIf(*gpu_unavailable)
+    @unittest.skipIf(*accelerator_unavailable)
     # pyre-ignore[56]
     @given(
         N=st.integers(min_value=1000, max_value=1000),
@@ -46,7 +48,7 @@ class HSTUComputeTest(unittest.TestCase):
         recompute_y_in_backward=st.sampled_from([True, False]),
         dtype=st.sampled_from(
             [torch.float32, torch.bfloat16]
-            if torch.cuda.get_device_capability(torch.device("cuda"))[0] >= 8
+            if accelerator_supports_bf16()
             else [torch.float32]
         ),
     )
@@ -65,7 +67,7 @@ class HSTUComputeTest(unittest.TestCase):
             opt_kernel=HammerKernel.TRITON,
         )
 
-    @unittest.skipIf(*gpu_unavailable)
+    @unittest.skipIf(*accelerator_unavailable)
     # pyre-ignore[56]
     @given(
         N=st.just(1500000),
@@ -121,14 +123,15 @@ class HSTUComputeTest(unittest.TestCase):
         torch.manual_seed(0)
         torch.backends.cudnn.allow_tf32 = False
         torch.backends.cuda.matmul.allow_tf32 = False
+        device = get_accelerator_device()
         dropout_ratio = 0.3 if training else 0.0
         attn = (
-            torch.empty((N, L), dtype=dtype, device=torch.device("cuda"))
+            torch.empty((N, L), dtype=dtype, device=device)
             .uniform_(-0.1, 0.1)
             .requires_grad_()
         )
         u = (
-            torch.empty((N, L), dtype=dtype, device=torch.device("cuda"))
+            torch.empty((N, L), dtype=dtype, device=device)
             .uniform_(-0.1, 0.1)
             .requires_grad_()
         )
@@ -136,7 +139,7 @@ class HSTUComputeTest(unittest.TestCase):
             torch.empty(
                 (L if not group_norm else num_heads,),
                 dtype=dtype,
-                device=torch.device("cuda"),
+                device=device,
             )
             .uniform_(-0.1, 0.1)
             .requires_grad_()
@@ -145,7 +148,7 @@ class HSTUComputeTest(unittest.TestCase):
             torch.empty(
                 (L if not group_norm else num_heads,),
                 dtype=dtype,
-                device=torch.device("cuda"),
+                device=device,
             )
             .uniform_(-0.1, 0.1)
             .requires_grad_()
@@ -161,12 +164,12 @@ class HSTUComputeTest(unittest.TestCase):
             if concat_x:
                 L_mult += 1
         output_weight = (
-            torch.empty((L * L_mult, D), dtype=dtype, device=torch.device("cuda"))
+            torch.empty((L * L_mult, D), dtype=dtype, device=device)
             .uniform_(-0.1, 0.1)
             .requires_grad_()
         )
         x = (
-            torch.empty((N, D), dtype=dtype, device=torch.device("cuda"))
+            torch.empty((N, D), dtype=dtype, device=device)
             .uniform_(-0.1, 0.1)
             .requires_grad_()
         )
@@ -266,7 +269,7 @@ class HSTUComputeTest(unittest.TestCase):
             torch.testing.assert_close(ref_dx, opt_dx)
             torch.testing.assert_close(ref_d_output_w, opt_d_output_w)
 
-    @unittest.skipIf(*gpu_unavailable)
+    @unittest.skipIf(*accelerator_unavailable)
     # pyre-ignore
     @given(
         batch_size=st.integers(4, 8),
@@ -278,11 +281,7 @@ class HSTUComputeTest(unittest.TestCase):
         hidden_dim=st.sampled_from([16, 32, 64, 128]),
         causal=st.sampled_from([True]),
         has_multiple_targets=st.sampled_from([True, False]),
-        dtype=st.sampled_from(
-            [torch.float32]
-            if torch.cuda.get_device_capability(torch.device("cuda"))[0] >= 8
-            else [torch.float32]
-        ),
+        dtype=st.sampled_from([torch.float32]),
         contextual_seq_len=st.sampled_from([0]),
         has_max_attn_len=st.sampled_from([False, True]),
         sort_by_length=st.sampled_from([True, False]),
@@ -331,6 +330,7 @@ class HSTUComputeTest(unittest.TestCase):
         set_dev_mode(True)
         torch.backends.cudnn.allow_tf32 = False
         torch.backends.cuda.matmul.allow_tf32 = False
+        device = get_accelerator_device()
 
         from generative_recommenders.ops.hstu_compute import (
             hstu_preprocess_and_attention,
@@ -342,16 +342,14 @@ class HSTUComputeTest(unittest.TestCase):
                 size=batch_size,
                 max_seq_len=max_uih_len,
                 sparsity=sparsity,
-                device=torch.device("cuda"),
+                device=device,
             )
         else:
             lengths = torch.randint(
-                max_uih_len + 1, size=(batch_size,), device=torch.device("cuda")
+                max_uih_len + 1, size=(batch_size,), device=device
             )
 
-        num_targets = torch.randint(
-            max_targets + 1, size=(batch_size,), device=torch.device("cuda")
-        )
+        num_targets = torch.randint(max_targets + 1, size=(batch_size,), device=device)
         lengths = lengths + num_targets
         max_seq_len = max_uih_len + max_targets
         if has_max_attn_len:
@@ -359,19 +357,19 @@ class HSTUComputeTest(unittest.TestCase):
         else:
             max_attn_len = 0
         seq_offsets = torch.zeros(
-            (batch_size + 1,), dtype=torch.int64, device=torch.device("cuda")
+            (batch_size + 1,), dtype=torch.int64, device=device
         )
         seq_offsets[1:] = torch.cumsum(lengths, dim=0)
 
         L = int(seq_offsets[-1].item())
 
         x = (
-            torch.empty((L, embedding_dim), dtype=dtype, device=torch.device("cuda"))
+            torch.empty((L, embedding_dim), dtype=dtype, device=device)
             .uniform_(-0.1, 0.1)
             .requires_grad_()
         )
         norm_weight = (
-            torch.empty((embedding_dim,), dtype=dtype, device=torch.device("cuda"))
+            torch.empty((embedding_dim,), dtype=dtype, device=device)
             .uniform_(-0.1, 0.1)
             .requires_grad_()
         )
@@ -379,7 +377,7 @@ class HSTUComputeTest(unittest.TestCase):
             torch.empty(
                 (embedding_dim,),
                 dtype=dtype,
-                device=torch.device("cuda"),
+                device=device,
             )
             .uniform_(-0.1, 0.1)
             .requires_grad_()
@@ -392,7 +390,7 @@ class HSTUComputeTest(unittest.TestCase):
                     (hidden_dim * 2 + attn_dim * 2) * heads,
                 ),
                 dtype=dtype,
-                device=torch.device("cuda"),
+                device=device,
             )
             .uniform_(-0.1, 0.1)
             .requires_grad_()
@@ -401,7 +399,7 @@ class HSTUComputeTest(unittest.TestCase):
             torch.empty(
                 (hidden_dim * 2 + attn_dim * 2) * heads,
                 dtype=dtype,
-                device=torch.device("cuda"),
+                device=device,
             )
             .uniform_(-0.1, 0.1)
             .requires_grad_()
