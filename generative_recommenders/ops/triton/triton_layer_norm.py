@@ -917,8 +917,10 @@ def _weighted_rms_norm_fwd(
     y = y * w[None, :]
 
     if SILU:
+        # Cap the exponent so 1 + exp(.) stays below 2**126, the bound past
+        # which fast_dividef is inaccurate and can return NaN.
         # pyre-ignore[16]: Module `triton.language.math` has no attribute `fast_dividef`
-        y = fast_dividef(y, 1.0 + tl.exp(-y))
+        y = fast_dividef(y, 1.0 + tl.exp(tl.minimum(-y, 87.0)))
 
     tl.store(Y_block_ptr, y.to(Y.dtype.element_ty), boundary_check=(0, 1))
 
@@ -1075,8 +1077,10 @@ def _weighted_rms_norm_bwd(
         # Apply SILU backward if enabled
         if SILU:
             y_before_silu = xhat * w[None, :]
+            # Cap the exponent so 1 + exp(.) stays below 2**126, the bound past
+            # which fast_dividef is inaccurate and can return NaN.
             # pyre-fixme[16]
-            sig_y = fast_dividef(1.0, 1.0 + tl.exp(-y_before_silu))
+            sig_y = fast_dividef(1.0, 1.0 + tl.exp(tl.minimum(-y_before_silu, 87.0)))
             # SILU derivative: sigmoid(y) + y * sigmoid(y) * (1 - sigmoid(y))
             dy_block = dy_block * (sig_y + y_before_silu * sig_y * (1.0 - sig_y))
 
