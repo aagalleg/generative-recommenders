@@ -303,6 +303,76 @@ class HSTUComputeTest(unittest.TestCase):
             real_kernel=HammerKernel.TRITON,
         )
 
+    @unittest.skipIf(*accelerator_unavailable)
+    def test_preprocess_and_attention_very_negative_logits(self) -> None:
+        # q = 2 and k = -2 in every dim make every q.k * alpha exactly -128, so
+        # 1 + exp(-qk) is inf.
+        from generative_recommenders.ops.hstu_compute import (
+            hstu_preprocess_and_attention,
+        )
+
+        set_dev_mode(True)
+        torch.manual_seed(0)
+        device = get_accelerator_device()
+        heads, attn_dim, hidden_dim, embedding_dim = 2, 32, 32, 32
+        lengths = torch.tensor([7, 40, 64, 1], device=device)
+        seq_offsets = torch.zeros((5,), dtype=torch.int64, device=device)
+        seq_offsets[1:] = torch.cumsum(lengths, dim=0)
+        L = int(seq_offsets[-1].item())
+        uvqk_dim = (hidden_dim * 2 + attn_dim * 2) * heads
+        q_start = hidden_dim * 2 * heads
+        k_start = q_start + attn_dim * heads
+        uvqk_weight = torch.empty((embedding_dim, uvqk_dim), device=device).uniform_(
+            -0.01, 0.01
+        )
+        uvqk_weight[:, q_start:] = 0.0
+        uvqk_bias = torch.empty((uvqk_dim,), device=device).uniform_(-0.1, 0.1)
+        uvqk_bias[q_start:k_start] = 2.0
+        uvqk_bias[k_start:] = -2.0
+        inputs = {
+            "x": torch.empty((L, embedding_dim), device=device).uniform_(-0.1, 0.1),
+            "norm_weight": torch.empty((embedding_dim,), device=device).uniform_(
+                -0.1, 0.1
+            ),
+            "norm_bias": torch.empty((embedding_dim,), device=device).uniform_(
+                -0.1, 0.1
+            ),
+            "uvqk_weight": uvqk_weight,
+            "uvqk_bias": uvqk_bias,
+        }
+        dout = torch.randn((L, (hidden_dim * 2) * heads), device=device) * 0.01
+
+        grads = {}
+        for kernel in [HammerKernel.PYTORCH, HammerKernel.TRITON]:
+            leaves = {
+                n: t.detach().clone().requires_grad_() for n, t in inputs.items()
+            }
+            u, attn_output, _, _ = hstu_preprocess_and_attention(
+                **leaves,
+                norm_eps=1e-6,
+                num_heads=heads,
+                attn_dim=attn_dim,
+                hidden_dim=hidden_dim,
+                max_seq_len=int(lengths.max().item()),
+                seq_offsets=seq_offsets,
+                attn_alpha=1.0,
+                causal=True,
+                num_targets=None,
+                max_attn_len=0,
+                contextual_seq_len=0,
+                recompute_uvqk_in_backward=False,
+                recompute_normed_x_in_backward=False,
+                sort_by_length=False,
+                kernel=kernel,
+            )
+            torch.cat([u, attn_output], dim=1).backward(dout)
+            # pyre-ignore[16]
+            grads[kernel] = {n: t.grad for n, t in leaves.items()}
+
+        for n, real in grads[HammerKernel.TRITON].items():
+            self.assertTrue(bool(torch.isfinite(real).all()), f"non-finite d{n}")
+            torch.testing.assert_close(grads[HammerKernel.PYTORCH][n], real)
+
     def _test_hstu_preprocess_and_attention(
         self,
         batch_size: int,
