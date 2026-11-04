@@ -55,6 +55,7 @@ from torchrec.distributed.model_parallel import (
     DistributedModelParallel,
 )
 from torchrec.distributed.planner import EmbeddingShardingPlanner, Topology
+from torchrec.distributed.planner.types import ParameterConstraints
 from torchrec.distributed.sharding_plan import get_default_sharders
 from torchrec.distributed.types import (
     ShardedModule,
@@ -378,6 +379,25 @@ def make_optimizer_and_shard(
         if device.type == "xpu"
         else 160 * 1024 * 1024 * 1024
     )
+    
+    constraints = None
+    if device.type == "xpu":
+        constraints = {}
+        for module in model.modules():
+            if type(module) not in TORCHREC_TYPES:
+                continue
+            configs = (
+                module.embedding_configs()
+                if isinstance(module, EmbeddingCollection)
+                else module.embedding_bag_configs()
+            )
+            for config in configs:
+                constraints[config.name] = ParameterConstraints(
+                    sharding_types=[
+                        ShardingType.TABLE_WISE.value,
+                        ShardingType.ROW_WISE.value,
+                    ]
+                )
     planner = EmbeddingShardingPlanner(
         topology=Topology(
             local_world_size=world_size,
@@ -385,7 +405,8 @@ def make_optimizer_and_shard(
             compute_device=device.type,
             hbm_cap=hbm_cap,
             ddr_cap=32 * 1024 * 1024 * 1024,
-        )
+        ),
+        constraints=constraints,
     )
     pg = dist.GroupMember.WORLD
     env = ShardingEnv.from_process_group(pg)  # pyre-ignore [6]
