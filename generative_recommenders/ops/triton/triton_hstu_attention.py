@@ -406,6 +406,8 @@ def _hstu_attn_fwd_one_block(  # noqa: C901
     ENABLE_TMA: tl.constexpr,
 ):
     start_n = tl.multiple_of(start_n, BLOCK_N)
+    # offs_n holds absolute key positions here; it is clamped further down.
+    n_mask = offs_n < seq_len
     # -- compute qk ----
     k = None
     qk = None
@@ -416,7 +418,7 @@ def _hstu_attn_fwd_one_block(  # noqa: C901
         # tma can only be loaded in one order, use trans afterwards
         qk = tl.dot(q, tl.trans(k), allow_tf32=ALLOW_TF32) * alpha
     else:
-        k = tl.load(K_block_ptr, boundary_check=(1,), padding_option="zero")
+        k = tl.load(K_block_ptr, mask=n_mask[None, :], other=0.0)
         qk = tl.dot(q, k, allow_tf32=ALLOW_TF32) * alpha
     invalid_mask = offs_m[:, None] == offs_n[None, :]
     max_ids = seq_len
@@ -470,7 +472,7 @@ def _hstu_attn_fwd_one_block(  # noqa: C901
             [(seq_start + start_n).to(tl.int32), offset_vh.to(tl.int32)],
         )
     else:
-        v = tl.load(V_block_ptr, boundary_check=(0,), padding_option="zero")
+        v = tl.load(V_block_ptr, mask=n_mask[:, None], other=0.0)
     silu = silu.to(v.dtype)
     return tl.dot(silu, v, allow_tf32=ALLOW_TF32)
 
@@ -542,41 +544,42 @@ def _hstu_attn_fwd_compute(  # noqa C901
         K_block_ptr = None
         V_block_ptr = None
         if not ENABLE_TMA:
+            # Pointer tiles; advancing them by n keys adds n * stride_{k,v}n.
+            offs_d_q = tl.arange(0, BLOCK_D_Q)
+            offs_d_v = tl.arange(0, BLOCK_D_V)
             if IS_DELTA_Q:
-                Q_block_ptr = tl.make_block_ptr(
-                    base=Q + off_h * stride_qh + off_z * DeltaSize * stride_qm,
-                    shape=(DeltaSize, BLOCK_D_Q),
-                    strides=(stride_qm, 1),
-                    offsets=(start_m_delta, 0),
-                    block_shape=(BLOCK_M, BLOCK_D_Q),
-                    order=(1, 0),
+                offs_q = start_m_delta + tl.arange(0, BLOCK_M)
+                Q_block_ptr = (
+                    Q
+                    + off_h * stride_qh
+                    + off_z * DeltaSize * stride_qm
+                    + offs_q[:, None] * stride_qm
+                    + offs_d_q[None, :]
                 )
+                q = tl.load(Q_block_ptr, mask=(offs_q < DeltaSize)[:, None], other=0.0)
             else:
-                Q_block_ptr = tl.make_block_ptr(
-                    base=Q + off_h * stride_qh + seq_start * stride_qm,
-                    shape=(seq_len, BLOCK_D_Q),
-                    strides=(stride_qm, 1),
-                    offsets=(start_m, 0),
-                    block_shape=(BLOCK_M, BLOCK_D_Q),
-                    order=(1, 0),
+                Q_block_ptr = (
+                    Q
+                    + off_h * stride_qh
+                    + seq_start * stride_qm
+                    + offs_m[:, None] * stride_qm
+                    + offs_d_q[None, :]
                 )
-            q = tl.load(Q_block_ptr, boundary_check=(0,), padding_option="zero")
+                q = tl.load(Q_block_ptr, mask=(offs_m < seq_len)[:, None], other=0.0)
 
-            K_block_ptr = tl.make_block_ptr(
-                base=K + off_h * stride_kh + seq_start * stride_kn,
-                shape=(BLOCK_D_Q, seq_len),
-                strides=(1, stride_kn),
-                offsets=(0, 0),
-                block_shape=(BLOCK_D_Q, BLOCK_N),
-                order=(0, 1),
+            K_block_ptr = (
+                K
+                + off_h * stride_kh
+                + seq_start * stride_kn
+                + offs_d_q[:, None]
+                + offs_n[None, :] * stride_kn
             )
-            V_block_ptr = tl.make_block_ptr(
-                base=V + off_h * stride_vh + seq_start * stride_vn,
-                shape=(seq_len, BLOCK_D_V),
-                strides=(stride_vn, 1),
-                offsets=(0, 0),
-                block_shape=(BLOCK_N, BLOCK_D_V),
-                order=(1, 0),
+            V_block_ptr = (
+                V
+                + off_h * stride_vh
+                + seq_start * stride_vn
+                + offs_n[:, None] * stride_vn
+                + offs_d_v[None, :]
             )
         else:
             if IS_DELTA_Q:
@@ -626,8 +629,8 @@ def _hstu_attn_fwd_compute(  # noqa C901
 
         if low > 0:
             if not ENABLE_TMA:
-                K_block_ptr = tl.advance(K_block_ptr, (0, low))
-                V_block_ptr = tl.advance(V_block_ptr, (low, 0))
+                K_block_ptr += low * stride_kn
+                V_block_ptr += low * stride_vn
         end_n = low
         for start_n in range(low, high, BLOCK_N):
             acc += _hstu_attn_fwd_one_block(
@@ -660,8 +663,8 @@ def _hstu_attn_fwd_compute(  # noqa C901
                 ENABLE_TMA=ENABLE_TMA,
             )
             if not ENABLE_TMA:
-                K_block_ptr = tl.advance(K_block_ptr, (0, BLOCK_N))
-                V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
+                K_block_ptr += BLOCK_N * stride_kn
+                V_block_ptr += BLOCK_N * stride_vn
             end_n += BLOCK_N
 
         if HAS_MULTIPLE_TARGETS:
@@ -671,8 +674,8 @@ def _hstu_attn_fwd_compute(  # noqa C901
                 high_delta = start_m + BLOCK_M
                 offset = (low_delta - end_n).to(tl.int32)
                 if not ENABLE_TMA:
-                    K_block_ptr = tl.advance(K_block_ptr, (0, offset))
-                    V_block_ptr = tl.advance(V_block_ptr, (offset, 0))
+                    K_block_ptr += offset * stride_kn
+                    V_block_ptr += offset * stride_vn
                 for start_delta in tl.range(
                     low_delta, high_delta, BLOCK_N, num_stages=1
                 ):
@@ -706,8 +709,8 @@ def _hstu_attn_fwd_compute(  # noqa C901
                         ENABLE_TMA=ENABLE_TMA,
                     )
                     if not ENABLE_TMA:
-                        K_block_ptr = tl.advance(K_block_ptr, (0, BLOCK_N))
-                        V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
+                        K_block_ptr += BLOCK_N * stride_kn
+                        V_block_ptr += BLOCK_N * stride_vn
         # Don't use TMA in Jagged case since we don't want to overwrite
         # the output of another sequence
         if IS_DELTA_Q:
